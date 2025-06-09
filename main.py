@@ -1,17 +1,24 @@
 import os
 import logging
+import requests
+import random
 import asyncio
 import json
-from typing import List, Dict, Optional
-from fastapi import FastAPI, HTTPException
-from telegram import Bot
+import time
+import uuid
+from contextlib import asynccontextmanager
+from typing import Optional, Dict, List, Set
+from fastapi import FastAPI, Request, HTTPException
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, Application
 from web3 import Web3
+from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-from tenacity import retry, wait_exponential, stop_after_attempt
-import requests
+from decimal import Decimal
+import telegram
 import aiohttp
+import threading
 
 # Logging setup
 logging.basicConfig(
@@ -438,8 +445,10 @@ async def health_check():
         raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
 
 @app.post("/webhook")
-async def webhook(update: dict):
+async def webhook(request: Request):
     logger.info("Webhook received update")
+    update_data = await request.json()
+    update = Update.de_json(update_data, bot_app.bot)
     # Process update if needed (currently using polling, so this is a fallback)
     return {"status": "ok"}
 
