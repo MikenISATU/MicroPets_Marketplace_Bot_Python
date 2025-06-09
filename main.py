@@ -5,12 +5,11 @@ import random
 import asyncio
 import json
 import time
-import aiohttp
-import threading
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set
 from fastapi import FastAPI, Request, HTTPException
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, Application
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -21,7 +20,7 @@ import aiohttp
 
 # Logging setup
 logging.basicConfig(
-    format='%(levelasctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -281,7 +280,7 @@ async def polling_fallback(bot_app: Application) -> None:
             if bot_app.running and polling_task:
                 try:
                     await bot_app.updater.stop()
-                    await bot_app.shutdown()
+                    await bot_app.stop()
                     logger.info("Polling stopped")
                 except Exception as e:
                     logger.error(f"Error stopping polling: {e}")
@@ -567,7 +566,7 @@ async def noV(update: Update, context) -> None:
     logger.info(f"Received /noV command from chat {chat_id}")
     if not is_admin(update):
         logger.warning(f"Unauthorized /noV attempt from chat {chat_id}")
-        await context.bot.send_message(chat_id=chat_id, text="ok")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Testing event (no image)")
     try:
@@ -598,12 +597,12 @@ async def health_check():
     logger.info("Health check endpoint called")
     try:
         if not w3.is_connected():
-            logger.error(f"Web3 is not connected")
-            raise ValueError("Connection failed")
+            logger.error("Web3 is not connected")
+            raise Exception("Web3 connection failed")
         return {"status": "Connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503," detail=f"Service unavailable: {e}")
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
 
 @app.get("/webhook")
 async def webhook_get():
@@ -616,25 +615,20 @@ async def webhook(request: Request):
     try:
         data = await request.json()
         logger.debug(f"Webhook data: {json.dumps(data, indent=2)}")
-        update = Update.de_json(data, bot_app.bot.get_data)
+        update = Update.de_json(data, bot_app.bot)
         if update:
-            try:
-                await bot_app.process_update(update)
-                logger.info("Webhook update processed successfully")
-                return {"status": "OK"}
-            except Exception as e:
-                logger.error(f"Failed to process update: {e}")
-                raise
+            await bot_app.process_update(update)
+            logger.info("Webhook update processed successfully")
+            return {"status": "OK"}
         else:
             logger.error("Invalid update data received")
             raise HTTPException(status_code=400, detail="Invalid update data")
-        except Exception as e:
-            logger.error(f"Webhook processing failed: {e}")
-            raise.error(f"Failed to handle webhook: {str(e)}")
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        recent_errors.append({"error": "Webhook processing error", "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"})
-        raise HTTPException(status_code=500," detail=f"Webhook processing failed: {e}")
+        logger.error(f"Webhook processing failed: {e}")
+        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
+        if len(recent_errors) > 5:
+            recent_errors.pop(0)
+        raise HTTPException(status_code=500, detail=f"Webhook processing failed: {e}")
 
 # Lifespan handler
 @asynccontextmanager
@@ -645,27 +639,27 @@ async def lifespan(app: FastAPI):
         bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         bot_app.add_handler(CommandHandler("start", start))
         bot_app.add_handler(CommandHandler("track", track))
-        bot_app.add_handler(CommandHandler("stop", stop)))
-        bot_app.add_handler(CommandHandler("stats", stats)))
-        bot_app.add_handler(CommandHandler("help", help_command)))
-        bot_app.add_handler(CommandHandler("status", status)))
-        bot_app.add_handler(CommandHandler("debug", debug)))
-        bot_app.add_handler(CommandHandler("test", test)))
-        bot_app.add_handler(Command("noV", noV)))
-        await bot_app.async_initinitialize()
-        # Define commands
+        bot_app.add_handler(CommandHandler("stop", stop))
+        bot_app.add_handler(CommandHandler("stats", stats))
+        bot_app.add_handler(CommandHandler("help", help_command))
+        bot_app.add_handler(CommandHandler("status", status))
+        bot_app.add_handler(CommandHandler("debug", debug))
+        bot_app.add_handler(CommandHandler("test", test))
+        bot_app.add_handler(CommandHandler("noV", noV))
+        await bot_app.initialize()
+        # Define commands using BotCommand for validation
         commands = [
-            ('/start', 'Start bot'),
-            ('/track/', 'Start tracking events'),
-            ('/stop', 'Stop tracking events'),
-            ('/stats', 'Show marketplace stats'),
-            ('/help', 'Show commands'),
-            ('/status', 'Check bot status'),
-            ('/debug', 'Show debug info'),
-            ('/test', 'Test event notification'),
-            ('/noV', 'Test event without image')
+            BotCommand(command="start", description="Start the bot"),
+            BotCommand(command="track", description="Start tracking events"),
+            BotCommand(command="stop", description="Stop tracking events"),
+            BotCommand(command="stats", description="Show marketplace stats"),
+            BotCommand(command="help", description="Show commands"),
+            BotCommand(command="status", description="Check bot status"),
+            BotCommand(command="debug", description="Show debug info"),
+            BotCommand(command="test", description="Test event notification"),
+            BotCommand(command="noV", description="Test event without image")
         ]
-        logger.info(f"Setting bot commands: {commands}")
+        logger.info(f"Setting bot commands: {[cmd.to_dict() for cmd in commands]}")
         try:
             await bot_app.bot.set_my_commands(commands)
             logger.info("Bot commands set successfully")
@@ -687,37 +681,34 @@ async def lifespan(app: FastAPI):
             if monitoring_task:
                 monitoring_task.cancel()
                 try:
-                    await asyncio.sleep(monitoring_task)
+                    await monitoring_task
                 except asyncio.CancelledError:
                     logger.info("Monitoring task cancelled")
                 monitoring_task = None
             if polling_task:
                 polling_task.cancel()
                 try:
-                    await asyncio.sleep(polling_task())
+                    await polling_task
                 except asyncio.CancelledError:
                     logger.info("Polling task cancelled")
                 polling_task = None
             if bot_app and bot_app.running:
+                await bot_app.stop()
                 await bot_app.shutdown()
-                await asyncio.bot_app.shutdown()
                 try:
-                    await bot_app.bot.delete_webhook()
+                    await bot_app.bot.delete_webhook(drop_pending_updates=True)
                     logger.info("Webhook deleted")
-                    except Exception as e:
-                        logger.error(f"Failed to delete webhook: {e}")
                 except Exception as e:
-                    logger.error(f"Shutdown error: {e}")
-                    raise
+                    logger.error(f"Failed to delete webhook: {e}")
             logger.info("Bot shutdown completed")
-            except Exception as e:
+        except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
-app = FastAPI(lifespan=lifespan))
+app = FastAPI(lifespan=lifespan)
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Starting Uvicorn server on port {PORT}: {PORT}")
+    logger.info(f"Starting Uvicorn server on port {PORT}")
     try:
         uvicorn.run(app, host="0.0.0.0", port=PORT)
     except Exception as e:
