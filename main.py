@@ -9,13 +9,13 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set
 from fastapi import FastAPI, Request, HTTPException
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, Application, CallbackContext
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, Application
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-from decimal import Decimal
+import telegram
 import aiohttp
 import threading
 
@@ -30,6 +30,12 @@ httpx_logger.setLevel(logging.WARNING)
 telegram_logger = logging.getLogger("telegram")
 telegram_logger.setLevel(logging.WARNING)
 
+# Verify python-telegram-bot version
+logger.info(f"python-telegram-bot version: {telegram.__version__}")
+if not telegram.__version__.startswith('20'):
+    logger.error(f"Expected python-telegram-bot v20.0+, got {telegram.__version__}")
+    raise SystemExit(1)
+
 # Load environment variables
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -42,8 +48,7 @@ ALPHA_CHAT_ID = os.getenv('ALPHA_CHAT_ID')
 MARKET_CHAT_ID = os.getenv('MARKET_CHAT_ID')
 POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
 PORT = int(os.getenv('PORT', 8080))
-BSC_URL = os.getenv('BSC_URL')
-APP_URL = os.getenv('APP_URL')
+APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
 
 # Validate environment variables
 missing_vars = []
@@ -56,7 +61,6 @@ for var, name in [
     (TELEGRAM_CHAT_ID, 'TELEGRAM_CHAT_ID'),
     (ALPHA_CHAT_ID, 'ALPHA_CHAT_ID'),
     (MARKET_CHAT_ID, 'MARKET_CHAT_ID'),
-    (BSC_URL, 'BSC_URL'),
     (APP_URL, 'APP_URL')
 ]:
     if not var:
@@ -65,12 +69,16 @@ if missing_vars:
     logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
     raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
+# Log environment variables (obscure sensitive ones)
+logger.info(f"Environment loaded. APP_URL={APP_URL}, PORT={PORT}, CONTRACT_ADDRESS={CONTRACT_ADDRESS}, "
+            f"TELEGRAM_CHAT_ID={TELEGRAM_CHAT_ID}, ALPHA_CHAT_ID={ALPHA_CHAT_ID}, MARKET_CHAT_ID={MARKET_CHAT_ID}, "
+            f"ADMIN_CHAT_ID={ADMIN_CHAT_ID}, BSCSCAN_API_KEY={'***' if BSCSCAN_API_KEY else 'None'}, "
+            f"TELEGRAM_BOT_TOKEN={'***' if TELEGRAM_BOT_TOKEN else 'None'}")
+
 # Validate Ethereum address
 if not Web3.is_address(CONTRACT_ADDRESS):
     logger.error(f"Invalid Ethereum address for CONTRACT_ADDRESS: {CONTRACT_ADDRESS}")
     raise ValueError(f"Invalid Ethereum address for CONTRACT_ADDRESS: {CONTRACT_ADDRESS}")
-
-logger.info(f"Environment loaded successfully. PORT={PORT}, APP_URL={APP_URL}")
 
 # Initialize Web3
 try:
@@ -94,11 +102,13 @@ posted_events: Set[str] = set()
 last_block_number: Optional[int] = None
 is_monitoring_enabled: bool = False
 monitoring_task: Optional[asyncio.Task] = None
+polling_task: Optional[asyncio.Task] = None
 recent_errors: List[Dict] = []
+active_chats: Set[str] = {TELEGRAM_CHAT_ID}
 
 # Static Image URLs (replace with actual hosted URLs)
-LISTING_IMAGE_URL = "https://example.com/new_listing_notification.jpg"  # Replace with actual URL
-SOLD_IMAGE_URL = "https://example.com/3d_nft_sold.jpg"  # Replace with actual URL
+LISTING_IMAGE_URL = "https://example.com/new_listing_notification.jpg"  # Replace with actual Cloudinary URL
+SOLD_IMAGE_URL = "https://example.com/3d_nft_sold.jpg"  # Replace with actual Cloudinary URL
 
 # Links
 MARKETPLACE_LINK = "https://pets.micropets.io/marketplace"
@@ -209,7 +219,7 @@ async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] =
                 'blockNumber': log['blockNumber'],
                 'topics': [topic.hex() for topic in log['topics']],
                 'timeStamp': w3.eth.get_block(log['blockNumber'])['timestamp'],
-                'value': log.get('data', '0x0')  # Assuming value is in log data for price calculation
+                'value': log.get('data', '0x0')  # Assuming value is in log data
             }
             for log in logs
             if log['topics'] and log['topics'][0].hex() in [ADD_PUBLIC_LISTING_SELECTOR, SETTLE_PUBLIC_LISTING_SELECTOR]
@@ -222,39 +232,80 @@ async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] =
         logger.error(f"Failed to fetch logs: {e}")
         return []
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
-async def set_webhook(application: Application) -> bool:
+@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5))
+async def set_webhook_with_retry(bot_app: Application) -> bool:
+    webhook_url = f"https://{APP_URL}/webhook"
+    logger.info(f"Attempting to set webhook: {webhook_url}")
     try:
-        webhook_url = f"{APP_URL}/webhook"
-        await application.bot.delete_webhook(drop_pending_updates=True)  # Clear any existing webhook
-        await application.bot.set_webhook(url=webhook_url)
-        webhook_info = await application.bot.get_webhook_info()
-        logger.info(f"Webhook info: {webhook_info}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
+                if response.status != 200:
+                    raise Exception(f"Health check failed: {response.status}")
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+        await bot_app.bot.set_webhook(webhook_url, allowed_updates=["message", "channel_post"])
+        webhook_info = await bot_app.bot.get_webhook_info()
         if webhook_info.url != webhook_url:
             logger.error(f"Webhook URL mismatch: expected {webhook_url}, got {webhook_info.url}")
             return False
-        logger.info(f"Webhook set successfully at {webhook_url}")
+        logger.info(f"Webhook set successfully: {webhook_url}")
         return True
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
         return False
 
-async def send_message_with_retry(bot: Bot, chat_id: str, message: str, image_url: str, parse_mode: str = 'Markdown', max_retries: int = 3, delay: int = 2) -> bool:
+async def polling_fallback(bot_app: Application) -> None:
+    global polling_task
+    logger.info("Starting polling fallback")
+    while True:
+        try:
+            if not bot_app.running:
+                await bot_app.initialize()
+                await bot_app.start()
+                await bot_app.updater.start_polling(
+                    poll_interval=3,
+                    timeout=10,
+                    drop_pending_updates=True,
+                    error_callback=lambda e: logger.error(f"Polling error: {e}")
+                )
+                logger.info("Polling started successfully")
+                while True:
+                    await asyncio.sleep(60)
+            else:
+                logger.warning("Bot already running")
+                while polling_task and not polling_task.done():
+                    await asyncio.sleep(60)
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+            await asyncio.sleep(10)
+        finally:
+            if bot_app.running and polling_task:
+                try:
+                    await bot_app.updater.stop()
+                    await bot_app.shutdown()
+                    logger.info("Polling stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping polling: {e}")
+
+async def send_message_with_retry(bot, chat_id: str, message: str, image_url: str, parse_mode: str = 'Markdown', max_retries: int = 3, delay: int = 2) -> bool:
     for i in range(max_retries):
         try:
             logger.info(f"Attempt {i+1}/{max_retries} to send message to chat {chat_id}")
+            async with aiohttp.ClientSession() as session:
+                async with session.head(image_url, timeout=5) as head_response:
+                    if head_response.status != 200:
+                        raise Exception(f"Image URL inaccessible, status {head_response.status}")
             await bot.send_photo(chat_id=chat_id, photo=image_url, caption=message, parse_mode=parse_mode)
             logger.info(f"Successfully sent message to chat {chat_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to send message (attempt {i+1}/{max_retries}): {e}")
             if i == max_retries - 1:
-                logger.error(f"Failed to send message to {chat_id} after {max_retries} attempts")
+                await bot.send_message(chat_id, f"{message}\n\n⚠️ Image unavailable", parse_mode='Markdown')
                 return False
             await asyncio.sleep(delay)
     return False
 
-async def process_event(context: CallbackContext, event: Dict) -> bool:
+async def process_event(context, event: Dict) -> bool:
     global posted_events
     try:
         tx_hash = event['transactionHash']
@@ -311,7 +362,7 @@ async def process_event(context: CallbackContext, event: Dict) -> bool:
         logger.error(f"Error processing event {event.get('transactionHash', 'unknown')}: {e}")
         return False
 
-async def monitor_events(context: CallbackContext) -> None:
+async def monitor_events(context) -> None:
     global last_block_number, is_monitoring_enabled, monitoring_task
     logger.info("Starting event monitoring")
     while is_monitoring_enabled:
@@ -344,12 +395,13 @@ def is_admin(update: Update) -> bool:
     return str(update.effective_chat.id) == ADMIN_CHAT_ID
 
 # Command handlers
-async def start(update: Update, context: CallbackContext) -> None:
+async def start(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     logger.info(f"Received /start command from chat {chat_id}")
+    active_chats.add(str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to NFT Marketplace Tracker! Use /track to start event alerts.")
 
-async def track(update: Update, context: CallbackContext) -> None:
+async def track(update: Update, context) -> None:
     global is_monitoring_enabled, monitoring_task
     chat_id = update.effective_chat.id
     logger.info(f"Received /track command from chat {chat_id}")
@@ -357,15 +409,16 @@ async def track(update: Update, context: CallbackContext) -> None:
         logger.warning(f"Unauthorized /track attempt from chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    if is_monitoring_enabled and monitoring_task:
-        await context.bot.send_message(chat_id=chat_id, text="🚀 Tracking is already enabled. Notifications include images.")
-    else:
-        is_monitoring_enabled = True
-        monitoring_task = asyncio.create_task(monitor_events(context))
-        logger.info("Event monitoring started via /track command")
-        await context.bot.send_message(chat_id=chat_id, text="🚖 Tracking started. Notifications will include images.")
+    if is_monitoring_enabled:
+        await context.bot.send_message(chat_id=chat_id, text="🚀 Tracking already enabled")
+        return
+    is_monitoring_enabled = True
+    active_chats.add(str(chat_id))
+    monitoring_task = asyncio.create_task(monitor_events(context))
+    logger.info("Event monitoring started via /track command")
+    await context.bot.send_message(chat_id=chat_id, text="🚖 Tracking started. Notifications will include images.")
 
-async def stop(update: Update, context: CallbackContext) -> None:
+async def stop(update: Update, context) -> None:
     global is_monitoring_enabled, monitoring_task
     chat_id = update.effective_chat.id
     logger.info(f"Received /stop command from chat {chat_id}")
@@ -381,15 +434,16 @@ async def stop(update: Update, context: CallbackContext) -> None:
         except asyncio.CancelledError:
             logger.info("Monitoring task cancelled")
         monitoring_task = None
+    active_chats.discard(str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
 
-async def stats(update: Update, context: CallbackContext) -> None:
+async def stats(update: Update, context) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /stats command from chat {chat_id}")
+    logger.info(f"Received /stats command from {chat_id}")
     if not is_admin(update):
-        logger.warning(f"Unauthorized /stats attempt from chat {chat_id}")
+        logger.warning(f"Unauthorized /stats attempt from {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return
+        return True
     await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching $PETS data for the last 2 weeks")
     try:
         latest_block = w3.eth.block_number
@@ -398,12 +452,12 @@ async def stats(update: Update, context: CallbackContext) -> None:
         events = await fetch_logs(startblock=start_block, endblock=latest_block)
         if not events:
             await context.bot.send_message(chat_id=chat_id, text="🚫 No events found in the last 2 weeks")
-            return
+            return True
         two_weeks_ago = int((datetime.now() - timedelta(days=14)).timestamp())
         recent_events = [e for e in events if e.get('timeStamp', 0) >= two_weeks_ago]
         if not recent_events:
             await context.bot.send_message(chat_id=chat_id, text="🚫 No events in the last 2 weeks")
-            return
+            return True
         add_count = sum(1 for e in recent_events if e['topics'][0] == ADD_PUBLIC_LISTING_SELECTOR)
         settle_count = sum(1 for e in recent_events if e['topics'][0] == SETTLE_PUBLIC_LISTING_SELECTOR)
         message = (
@@ -413,43 +467,135 @@ async def stats(update: Update, context: CallbackContext) -> None:
             f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        return True
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch stats: {str(e)}")
+        return False
 
-async def status(update: Update, context: CallbackContext) -> None:
+async def help_command(update: Update, context) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /status command from chat {chat_id}")
+    logger.info(f"Received /help command from {chat_id}")
     if not is_admin(update):
-        logger.warning(f"Unauthorized /status attempt from chat {chat_id}")
+        logger.warning(f"Unauthorized /help attempt from {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return
+        return True
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "🆘 Commands:\n\n"
+            "/start - Start bot\n"
+            "/track - Enable alerts\n"
+            "/stop - Disable alerts\n"
+            "/stats - Show marketplace stats\n"
+            "/status - Check status\n"
+            "/test - Test event notification\n"
+            "/noV - Test without image\n"
+            "/debug - Debug info\n"
+            "/help - This help\n"
+        ),
+        parse_mode='Markdown'
+    )
+    return True
+
+async def status(update: Update, context) -> None:
+    chat_id = update.effective_chat.id
+    logger.info(f"Received /status command from {chat_id}")
+    if not is_admin(update):
+        logger.warning(f"Unauthorized /status attempt from {chat_id}")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        return True
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"🔍 *Status:* {'Enabled' if is_monitoring_enabled else 'Disabled'}",
         parse_mode='Markdown'
     )
+    return True
 
-async def debug(update: Update, context: CallbackContext) -> None:
+async def debug(update: Update, context) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /debug command from chat {chat_id}")
+    logger.info(f"Received /debug command from {chat_id}")
     if not is_admin(update):
-        logger.warning(f"Unauthorized /debug attempt from chat {chat_id}")
+        logger.warning(f"Unauthorized /debug attempt from {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return
+        return True
     status = {
         'monitoringEnabled': is_monitoring_enabled,
         'lastBlockNumber': last_block_number,
         'recentErrors': recent_errors[-5:],
         'apiStatus': {
             'bscWeb3': bool(w3.is_connected())
-        }
+        },
+        'activeChats': list(active_chats),
+        'pollingActive': polling_task is not None and not polling_task.done()
     }
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```",
         parse_mode='Markdown'
     )
+    return True
+
+async def test(update: Update, context) -> None:
+    chat_id = update.effective_chat.id
+    logger.info(f"Received /test command from {chat_id}")
+    if not is_admin(update):
+        logger.warning(f"Unauthorized /test attempt from {chat_id}")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        return True
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test event...")
+    try:
+        test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
+        test_pets_amount = random.randint(1000000, 5000000)
+        pets_price = get_pets_price_from_geckoterminal(int(time.time())) or 0.00003886
+        bnb_price = get_bnb_price_from_geckoterminal(int(time.time())) or 600
+        usd_value = test_pets_amount * pets_price
+        bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
+        message = (
+            f"🔥 *New Listing Notification* Test\n\n"
+            f"1 x Listing Evolved 3D NFT\n"
+            f"Listed for: {test_pets_amount:,.0f} $PETS\n\n"
+            f"🚀 *Join our Ascension Alpha Group* to get this notification 60 seconds earlier!\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+        )
+        success = await send_message_with_retry(context.bot, chat_id, message, LISTING_IMAGE_URL)
+        if success:
+            await context.bot.send_message(chat_id=chat_id, text="✅ Test successful")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Test failed: Unable to send notification")
+    except Exception as e:
+        logger.error(f"Test error: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
+    return True
+
+async def no_video(update: Update, context) -> None:
+    chat_id = update.effective_chat.id
+    logger.info(f"Received /noV command from {chat_id}")
+    if not is_admin(update):
+        logger.warning(f"Unauthorized /noV attempt from {chat_id}")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        return True
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Testing event (no image)")
+    try:
+        test_tx_hash = f"0xTestNoV{uuid.uuid4().hex[:16]}"
+        test_pets_amount = random.randint(1000000, 5000000)
+        pets_price = get_pets_price_from_geckoterminal(int(time.time())) or 0.00003886
+        bnb_price = get_bnb_price_from_geckoterminal(int(time.time())) or 600
+        usd_value = test_pets_amount * pets_price
+        bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
+        message = (
+            f"🌸 *3D NFT Sold!* Test\n\n"
+            f"1 x Listing Evolved 3D NFT\n"
+            f"💰 Sold for: {test_pets_amount:,.0f} $PETS\n"
+            f"💳 Worth: {bnb_value:.3f} BNB (${usd_value:.2f})\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+        )
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=chat_id, text="✅ Test successful")
+    except Exception as e:
+        logger.error(f"/noV error: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
+    return True
 
 # FastAPI routes
 app = FastAPI()
@@ -465,28 +611,36 @@ async def health_check():
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
 
+@app.get("/webhook")
+async def webhook_get():
+    logger.info("Received GET webhook")
+    raise HTTPException(status_code=405, detail="Method Not Allowed")
+
 @app.post("/webhook")
 async def webhook(request: Request):
     logger.info("Webhook received update")
     try:
-        update_data = await request.json()
-        logger.debug(f"Webhook data: {json.dumps(update_data, indent=2)}")
-        update = Update.de_json(update_data, bot_app.bot)
+        data = await request.json()
+        logger.debug(f"Webhook data: {json.dumps(data, indent=2)}")
+        update = Update.de_json(data, bot_app.bot)
         if update:
             await bot_app.process_update(update)
             logger.info("Webhook update processed successfully")
-            return {"status": "ok"}
+            return {"status": "OK"}
         else:
             logger.error("Invalid update data received")
             raise HTTPException(status_code=400, detail="Invalid update data")
     except Exception as e:
         logger.error(f"Webhook processing failed: {e}")
+        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
+        if len(recent_errors) > 5:
+            recent_errors.pop(0)
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {e}")
 
 # Lifespan handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global monitoring_task, bot_app
+    global monitoring_task, polling_task, bot_app
     logger.info("Starting bot application")
     try:
         bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -494,8 +648,11 @@ async def lifespan(app: FastAPI):
         bot_app.add_handler(CommandHandler("track", track))
         bot_app.add_handler(CommandHandler("stop", stop))
         bot_app.add_handler(CommandHandler("stats", stats))
+        bot_app.add_handler(CommandHandler("help", help_command))
         bot_app.add_handler(CommandHandler("status", status))
         bot_app.add_handler(CommandHandler("debug", debug))
+        bot_app.add_handler(CommandHandler("test", test))
+        bot_app.add_handler(CommandHandler("noV", no_video))
         await bot_app.initialize()
         await bot_app.bot.set_my_commands([
             ('start', 'Start the bot'),
@@ -503,20 +660,17 @@ async def lifespan(app: FastAPI):
             ('stop', 'Stop tracking events'),
             ('stats', 'Show marketplace stats'),
             ('status', 'Check bot status'),
-            ('debug', 'Show debug info')
+            ('debug', 'Show debug info'),
+            ('test', 'Test event notification'),
+            ('noV', 'Test without image'),
+            ('help', 'Show commands')
         ])
         # Set webhook with retry
-        if not await set_webhook(bot_app):
-            logger.info("Falling back to polling due to webhook setup failure")
-            await bot_app.updater.start_polling(
-                poll_interval=3,
-                timeout=10,
-                drop_pending_updates=True,
-                error_callback=lambda e: logger.error(f"Polling error: {e}")
-            )
-        else:
+        if await set_webhook_with_retry(bot_app):
             logger.info("Webhook mode active")
-        await bot_app.start()
+        else:
+            logger.info("Falling back to polling due to webhook setup failure")
+            polling_task = asyncio.create_task(polling_fallback(bot_app))
         yield
     except Exception as e:
         logger.error(f"Startup error: {e}")
@@ -531,9 +685,17 @@ async def lifespan(app: FastAPI):
                 except asyncio.CancelledError:
                     logger.info("Monitoring task cancelled")
                 monitoring_task = None
+            if polling_task:
+                polling_task.cancel()
+                try:
+                    await polling_task
+                except asyncio.CancelledError:
+                    logger.info("Polling task cancelled")
+                polling_task = None
             if bot_app and bot_app.running:
                 await bot_app.stop()
                 await bot_app.shutdown()
+                await bot_app.bot.delete_webhook(drop_pending_updates=True)
             logger.info("Bot shutdown completed")
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
