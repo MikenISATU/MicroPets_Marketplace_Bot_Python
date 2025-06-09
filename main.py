@@ -228,6 +228,11 @@ async def set_webhook(application: Application) -> bool:
         webhook_url = f"{APP_URL}/webhook"
         await application.bot.delete_webhook(drop_pending_updates=True)  # Clear any existing webhook
         await application.bot.set_webhook(url=webhook_url)
+        webhook_info = await application.bot.get_webhook_info()
+        logger.info(f"Webhook info: {webhook_info}")
+        if webhook_info.url != webhook_url:
+            logger.error(f"Webhook URL mismatch: expected {webhook_url}, got {webhook_info.url}")
+            return False
         logger.info(f"Webhook set successfully at {webhook_url}")
         return True
     except Exception as e:
@@ -341,12 +346,15 @@ def is_admin(update: Update) -> bool:
 # Command handlers
 async def start(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /start command from chat {chat_id}")
     await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to NFT Marketplace Tracker! Use /track to start event alerts.")
 
 async def track(update: Update, context: CallbackContext) -> None:
     global is_monitoring_enabled, monitoring_task
     chat_id = update.effective_chat.id
+    logger.info(f"Received /track command from chat {chat_id}")
     if not is_admin(update):
+        logger.warning(f"Unauthorized /track attempt from chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     if is_monitoring_enabled and monitoring_task:
@@ -354,12 +362,15 @@ async def track(update: Update, context: CallbackContext) -> None:
     else:
         is_monitoring_enabled = True
         monitoring_task = asyncio.create_task(monitor_events(context))
+        logger.info("Event monitoring started via /track command")
         await context.bot.send_message(chat_id=chat_id, text="🚖 Tracking started. Notifications will include images.")
 
 async def stop(update: Update, context: CallbackContext) -> None:
     global is_monitoring_enabled, monitoring_task
     chat_id = update.effective_chat.id
+    logger.info(f"Received /stop command from chat {chat_id}")
     if not is_admin(update):
+        logger.warning(f"Unauthorized /stop attempt from chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     is_monitoring_enabled = False
@@ -374,7 +385,9 @@ async def stop(update: Update, context: CallbackContext) -> None:
 
 async def stats(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /stats command from chat {chat_id}")
     if not is_admin(update):
+        logger.warning(f"Unauthorized /stats attempt from chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching $PETS data for the last 2 weeks")
@@ -406,7 +419,9 @@ async def stats(update: Update, context: CallbackContext) -> None:
 
 async def status(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /status command from chat {chat_id}")
     if not is_admin(update):
+        logger.warning(f"Unauthorized /status attempt from chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(
@@ -417,7 +432,9 @@ async def status(update: Update, context: CallbackContext) -> None:
 
 async def debug(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /debug command from chat {chat_id}")
     if not is_admin(update):
+        logger.warning(f"Unauthorized /debug attempt from chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     status = {
@@ -453,6 +470,7 @@ async def webhook(request: Request):
     logger.info("Webhook received update")
     try:
         update_data = await request.json()
+        logger.debug(f"Webhook data: {json.dumps(update_data, indent=2)}")
         update = Update.de_json(update_data, bot_app.bot)
         if update:
             await bot_app.process_update(update)
@@ -499,8 +517,6 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("Webhook mode active")
         await bot_app.start()
-        is_monitoring_enabled = True
-        monitoring_task = asyncio.create_task(monitor_events(bot_app))
         yield
     except Exception as e:
         logger.error(f"Startup error: {e}")
@@ -508,8 +524,6 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("Initiating bot shutdown...")
         try:
-            global is_monitoring_enabled
-            is_monitoring_enabled = False
             if monitoring_task:
                 monitoring_task.cancel()
                 try:
