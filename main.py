@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, Application
+from telegram.ext import ApplicationBuilder, CommandHandler, Application, CallbackContext
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
@@ -248,7 +248,7 @@ async def send_message_with_retry(bot: Bot, chat_id: str, message: str, image_ur
             await asyncio.sleep(delay)
     return False
 
-async def process_event(context, event: Dict) -> bool:
+async def process_event(context: CallbackContext, event: Dict) -> bool:
     global posted_events
     try:
         tx_hash = event['transactionHash']
@@ -305,7 +305,7 @@ async def process_event(context, event: Dict) -> bool:
         logger.error(f"Error processing event {event.get('transactionHash', 'unknown')}: {e}")
         return False
 
-async def monitor_events(context) -> None:
+async def monitor_events(context: CallbackContext) -> None:
     global last_block_number, is_monitoring_enabled, monitoring_task
     logger.info("Starting event monitoring")
     while is_monitoring_enabled:
@@ -335,11 +335,11 @@ def is_admin(update: Update) -> bool:
     return str(update.effective_chat.id) == ADMIN_CHAT_ID
 
 # Command handlers
-async def start(update: Update, context) -> None:
+async def start(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to NFT Marketplace Tracker! Use /track to start event alerts.")
 
-async def track(update: Update, context) -> None:
+async def track(update: Update, context: CallbackContext) -> None:
     global is_monitoring_enabled, monitoring_task
     chat_id = update.effective_chat.id
     if not is_admin(update):
@@ -352,7 +352,7 @@ async def track(update: Update, context) -> None:
         monitoring_task = asyncio.create_task(monitor_events(context))
         await context.bot.send_message(chat_id=chat_id, text="🚖 Tracking started. Notifications will include images.")
 
-async def stop(update: Update, context) -> None:
+async def stop(update: Update, context: CallbackContext) -> None:
     global is_monitoring_enabled, monitoring_task
     chat_id = update.effective_chat.id
     if not is_admin(update):
@@ -368,7 +368,7 @@ async def stop(update: Update, context) -> None:
         monitoring_task = None
     await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
 
-async def stats(update: Update, context) -> None:
+async def stats(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
@@ -400,7 +400,7 @@ async def stats(update: Update, context) -> None:
         logger.error(f"Error in /stats: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch stats: {str(e)}")
 
-async def status(update: Update, context) -> None:
+async def status(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
@@ -411,7 +411,7 @@ async def status(update: Update, context) -> None:
         parse_mode='Markdown'
     )
 
-async def debug(update: Update, context) -> None:
+async def debug(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
@@ -449,18 +449,18 @@ async def webhook(request: Request):
     logger.info("Webhook received update")
     update_data = await request.json()
     update = Update.de_json(update_data, bot_app.bot)
-    # Process update if needed (currently using polling, so this is a fallback)
+    await bot_app.process_update(update)
     return {"status": "ok"}
 
 # Lifespan handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global monitoring_task
+    global monitoring_task, bot_app
     logger.info("Starting bot application")
     try:
-        application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        await application.initialize()
-        await application.bot.set_my_commands([
+        bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        await bot_app.initialize()
+        await bot_app.bot.set_my_commands([
             ('start', 'Start the bot'),
             ('track', 'Start tracking events'),
             ('stop', 'Stop tracking events'),
@@ -468,10 +468,10 @@ async def lifespan(app: FastAPI):
             ('status', 'Check bot status'),
             ('debug', 'Show debug info')
         ])
-        # Attempt to set webhook, fallback to polling if fails
-        if not await set_webhook(application):
+        # Set webhook once
+        if not await set_webhook(bot_app):
             logger.info("Falling back to polling")
-            await application.updater.start_polling(
+            await bot_app.updater.start_polling(
                 poll_interval=3,
                 timeout=10,
                 drop_pending_updates=True,
@@ -479,8 +479,8 @@ async def lifespan(app: FastAPI):
             )
         else:
             logger.info("Webhook mode active")
-        await application.start()
-        monitoring_task = asyncio.create_task(monitor_events(application))
+        await bot_app.start()
+        monitoring_task = asyncio.create_task(monitor_events(bot_app))
         yield
     except Exception as e:
         logger.error(f"Startup error: {e}")
@@ -494,25 +494,14 @@ async def lifespan(app: FastAPI):
                 except asyncio.CancelledError:
                     logger.info("Monitoring task cancelled")
                 monitoring_task = None
-            if application.running:
-                await application.updater.stop() if not await set_webhook(application) else await application.stop()
-                await application.shutdown()
+            if bot_app.running:
+                await bot_app.stop()
+                await bot_app.shutdown()
             logger.info("Bot shutdown completed")
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
 app = FastAPI(lifespan=lifespan)
-
-# Bot initialization
-bot_app = ApplicationBuilder() \
-    .token(TELEGRAM_BOT_TOKEN) \
-    .build()
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("track", track))
-bot_app.add_handler(CommandHandler("stop", stop))
-bot_app.add_handler(CommandHandler("stats", stats))
-bot_app.add_handler(CommandHandler("status", status))
-bot_app.add_handler(CommandHandler("debug", debug))
 
 if __name__ == "__main__":
     import uvicorn
