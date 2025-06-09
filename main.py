@@ -9,7 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set
 from fastapi import FastAPI, Request, HTTPException
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, Application
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_exponential
