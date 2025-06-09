@@ -16,7 +16,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from decimal import Decimal
-import telegram
 import aiohttp
 import threading
 
@@ -91,10 +90,10 @@ except Exception as e:
 CONTRACT_ADDRESS = Web3.to_checksum_address(CONTRACT_ADDRESS)
 ADD_PUBLIC_LISTING_SELECTOR = "0xe7bab167"  # Selector for Add Public Listing
 SETTLE_PUBLIC_LISTING_SELECTOR = "0x018bd58e"  # Selector for Settle Public Listing
-posted_events: set = set()
+posted_events: Set[str] = set()
 last_block_number: Optional[int] = None
 is_monitoring_enabled: bool = False
-monitoring_task = None
+monitoring_task: Optional[asyncio.Task] = None
 recent_errors: List[Dict] = []
 
 # Static Image URLs (replace with actual hosted URLs)
@@ -223,9 +222,11 @@ async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] =
         logger.error(f"Failed to fetch logs: {e}")
         return []
 
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 async def set_webhook(application: Application) -> bool:
     try:
         webhook_url = f"{APP_URL}/webhook"
+        await application.bot.delete_webhook(drop_pending_updates=True)  # Clear any existing webhook
         await application.bot.set_webhook(url=webhook_url)
         logger.info(f"Webhook set successfully at {webhook_url}")
         return True
@@ -322,6 +323,9 @@ async def monitor_events(context: CallbackContext) -> None:
                 if await process_event(context, event):
                     last_block_number = max(last_block_number or 0, event['blockNumber'])
             await asyncio.sleep(POLLING_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info("Monitoring task cancelled")
+            break
         except Exception as e:
             logger.error(f"Error monitoring events: {e}")
             recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
@@ -447,10 +451,19 @@ async def health_check():
 @app.post("/webhook")
 async def webhook(request: Request):
     logger.info("Webhook received update")
-    update_data = await request.json()
-    update = Update.de_json(update_data, bot_app.bot)
-    await bot_app.process_update(update)
-    return {"status": "ok"}
+    try:
+        update_data = await request.json()
+        update = Update.de_json(update_data, bot_app.bot)
+        if update:
+            await bot_app.process_update(update)
+            logger.info("Webhook update processed successfully")
+            return {"status": "ok"}
+        else:
+            logger.error("Invalid update data received")
+            raise HTTPException(status_code=400, detail="Invalid update data")
+    except Exception as e:
+        logger.error(f"Webhook processing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Webhook processing failed: {e}")
 
 # Lifespan handler
 @asynccontextmanager
@@ -459,6 +472,12 @@ async def lifespan(app: FastAPI):
     logger.info("Starting bot application")
     try:
         bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        bot_app.add_handler(CommandHandler("start", start))
+        bot_app.add_handler(CommandHandler("track", track))
+        bot_app.add_handler(CommandHandler("stop", stop))
+        bot_app.add_handler(CommandHandler("stats", stats))
+        bot_app.add_handler(CommandHandler("status", status))
+        bot_app.add_handler(CommandHandler("debug", debug))
         await bot_app.initialize()
         await bot_app.bot.set_my_commands([
             ('start', 'Start the bot'),
@@ -468,9 +487,9 @@ async def lifespan(app: FastAPI):
             ('status', 'Check bot status'),
             ('debug', 'Show debug info')
         ])
-        # Set webhook once
+        # Set webhook with retry
         if not await set_webhook(bot_app):
-            logger.info("Falling back to polling")
+            logger.info("Falling back to polling due to webhook setup failure")
             await bot_app.updater.start_polling(
                 poll_interval=3,
                 timeout=10,
@@ -480,13 +499,17 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("Webhook mode active")
         await bot_app.start()
+        is_monitoring_enabled = True
         monitoring_task = asyncio.create_task(monitor_events(bot_app))
         yield
     except Exception as e:
         logger.error(f"Startup error: {e}")
+        raise
     finally:
         logger.info("Initiating bot shutdown...")
         try:
+            global is_monitoring_enabled
+            is_monitoring_enabled = False
             if monitoring_task:
                 monitoring_task.cancel()
                 try:
@@ -494,7 +517,7 @@ async def lifespan(app: FastAPI):
                 except asyncio.CancelledError:
                     logger.info("Monitoring task cancelled")
                 monitoring_task = None
-            if bot_app.running:
+            if bot_app and bot_app.running:
                 await bot_app.stop()
                 await bot_app.shutdown()
             logger.info("Bot shutdown completed")
