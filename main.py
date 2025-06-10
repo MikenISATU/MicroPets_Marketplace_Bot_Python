@@ -244,7 +244,7 @@ async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock:
                 'input': tx.get('input', '')
             }
             for tx in data['result']
-            if tx['input'] and ('list' in tx['input'].lower() or 'buy' in tx['input'].lower')
+            if tx['input'] and ('list' in tx['input'].lower() or 'buy' in tx['input'].lower())
         ]
         if transactions and not startblock:
             last_block_number = max(tx['blockNumber'] for tx in transactions)
