@@ -407,7 +407,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         usd_value = total_pets * pets_price
         bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
         message = (
-            f"📊 *MicroPets Marketplace Stats (Last 2 Weeks)*\n\n"
+            f"📩 *Marketplace Stats (Last 2 Weeks)*\n\n"
             f"🔥 New Listings: {add_count}\n"
             f"🌸 Sales: {settle_count}\n"
             f"💰 Total $PETS: {total_pets:,.0f} (${usd_value:.2f}/{bnb_value:.3f} BNB)\n\n"
@@ -615,7 +615,7 @@ async def lifespan(app: FastAPI):
         recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
         raise
     finally:
- goede logger.info("Initiating bot shutdown...")
+        logger.info("Initiating bot shutdown...")
         try:
             if monitoring_task:
                 monitoring_task.cancel()
