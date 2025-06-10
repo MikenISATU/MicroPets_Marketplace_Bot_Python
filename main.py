@@ -215,6 +215,7 @@ async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] =
                 logs.extend(batch_logs)
             except Exception as e:
                 logger.error(f"Partial fetch failed for range {startblock}-{current_endblock}: {e}")
+                await asyncio.sleep(5)  # Add delay to respect rate limit
                 break
             startblock = current_endblock + 1
         events = [
@@ -333,16 +334,16 @@ async def process_event(context, event: Dict) -> bool:
             message = (
                 f"🔥 *New Listing Notification* 🔥\n\n"
                 f"1x {nft_name}\n"
-                f"Listed for: {pets_amount:,.0f} $PETS (${usd_value:.2f}/{bnb_value:.3f} BNB)\n"
+                f"Listed for: {pets_amount:,.0f} $PETS\n"
                 f"Get it on the Marketplace 🎁 now before it's gone! 👀\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
         else:  # Settle Public Listing V2
             message = (
                 f"🌸 *3D NFT Sold!* 🌸\n\n"
-                f"Sold: 1x {nft_name}\n"
-                f"Sold for: {pets_amount:,.0f} $PETS (${usd_value:.2f}/{bnb_value:.3f} BNB)\n"
-                f"Worth: 0.13 BNB (${usd_value:.2f})\n\n"
+                f"{nft_name}\n"
+                f"**Sold for:** {pets_amount:,.0f} $PETS\n"
+                f"**Worth:** 💳 {usd_value:.2f}\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
         # Send to Alpha Chat ID
@@ -467,7 +468,7 @@ async def stats(update: Update, context) -> None:
             bnb_price = get_bnb_price_from_geckoterminal(timestamp) or 600
             usd_value = pets_amount * pets_price
             bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
-            message_parts.append(f"\n🔥 *New Listing: {metadata['name']}*\nListed for: {pets_amount:,.0f} $PETS (${usd_value:.2f}/{bnb_value:.3f} BNB)")
+            message_parts.append(f"\n🔥 *New Listing: {metadata['name']}*\nListed for: {pets_amount:,.0f} $PETS\n")
         if latest_sale:
             metadata = await fetch_nft_metadata(latest_sale['tokenId'])
             pets_amount = int(latest_sale['data'], 16) / 1e18
@@ -476,7 +477,7 @@ async def stats(update: Update, context) -> None:
             bnb_price = get_bnb_price_from_geckoterminal(timestamp) or 600
             usd_value = pets_amount * pets_price
             bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
-            message_parts.append(f"\n🌸 *Latest Sale: {metadata['name']}*\nSold for: {pets_amount:,.0f} $PETS (${usd_value:.2f}/{bnb_value:.3f} BNB)")
+            message_parts.append(f"\n🌸 *Latest Sale: {metadata['name']}*\n**Sold for:** {pets_amount:,.0f} $PETS\n**Worth:** 💳 {usd_value:.2f}")
         message = "\n".join(message_parts) + f"\n\n📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         await send_message_with_retry(context.bot, chat_id, message, NFT_IMAGE_URL if not (latest_listing or latest_sale) else (await fetch_nft_metadata(latest_listing['tokenId'] if latest_listing else latest_sale['tokenId']))['image'])
     except Exception as e:
@@ -562,7 +563,7 @@ async def test(update: Update, context) -> None:
         listing_message = (
             f"🔥 *New Listing Notification* 🔥\n\n"
             f"1x {nft_name}\n"
-            f"Listed for: {test_pets_amount:,.0f} $PETS (${usd_value:.2f}/{bnb_value:.3f} BNB)\n"
+            f"Listed for: {test_pets_amount:,.0f} $PETS\n"
             f"Get it on the Marketplace 🎁 now before it's gone! 👀\n\n"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
@@ -577,9 +578,9 @@ async def test(update: Update, context) -> None:
         bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
         sale_message = (
             f"🌸 *3D NFT Sold!* 🌸\n\n"
-            f"Sold: 1x {nft_name}\n"
-            f"Sold for: {test_pets_amount:,.0f} $PETS (${usd_value:.2f}/{bnb_value:.3f} BNB)\n"
-            f"Worth: 0.13 BNB (${usd_value:.2f})\n\n"
+            f"{nft_name}\n"
+            f"**Sold for:** {test_pets_amount:,.0f} $PETS\n"
+            f"**Worth:** 💳 {usd_value:.2f}\n\n"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
         success = await send_message_with_retry(context.bot, chat_id, sale_message, image_url)
