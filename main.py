@@ -200,7 +200,7 @@ def get_bnb_price(timestamp: int) -> float:
         return 600.0
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
-async\r\nasync def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] = None) -> List[Dict]:
+async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] = None) -> List[Dict]:
     global last_block_number
     try:
         if not startblock and last_block_number:
@@ -615,7 +615,7 @@ async def lifespan(app: FastAPI):
         recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
         raise
     finally:
-        logger.info("Initiating bot shutdown...")
+ goede logger.info("Initiating bot shutdown...")
         try:
             if monitoring_task:
                 monitoring_task.cancel()
