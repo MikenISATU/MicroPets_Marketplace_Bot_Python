@@ -33,7 +33,6 @@ telegram_logger.setLevel(logging.WARNING)
 # Load environment variables
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 BNB_RPC_URL = os.getenv('BNB_RPC_URL')
 CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS')
@@ -50,7 +49,6 @@ BSC_URL = os.getenv('BSC_URL', 'https://bscscan.com/token/0x2466858ab5edad0bb597
 missing_vars = []
 for var, name in [
     (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
-    (APP_URL, 'APP_URL'),
     (BSCSCAN_API_KEY, 'BSCSCAN_API_KEY'),
     (BNB_RPC_URL, 'BNB_RPC_URL'),
     (CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'),
@@ -75,7 +73,7 @@ if ALPHA_CHAT_ID:
 if MARKET_CHAT_ID:
     active_chats.add(MARKET_CHAT_ID)
 
-logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}, Active chats={active_chats}")
+logger.info(f"Environment loaded successfully. PORT={PORT}, Active chats={active_chats}")
 
 # Constants
 BASE_URL = "https://element.market/collections/micropetsnewerabnb-5414f1c9?search[toggles][0]=ALL"
@@ -202,7 +200,7 @@ def get_bnb_price(timestamp: int) -> float:
         return 600.0
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
-async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] = None) -> List[Dict]:
+async\r\nasync def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] = None) -> List[Dict]:
     global last_block_number
     try:
         if not startblock and last_block_number:
@@ -341,56 +339,6 @@ async def monitor_events(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Monitoring task stopped")
     monitoring_task = None
 
-@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5))
-async def set_webhook_with_retry(bot_app: ContextTypes.DEFAULT_TYPE) -> bool:
-    webhook_url = f"https://{APP_URL}/webhook"
-    logger.info(f"Attempting to set webhook: {webhook_url}")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
-                if response.status != 200:
-                    logger.error(f"Health check failed: {response.status}, response: {await response.text()}")
-                    raise Exception(f"Health check failed: {response.status}")
-        await bot_app.bot.delete_webhook(drop_pending_updates=True)
-        await bot_app.bot.set_webhook(webhook_url, allowed_updates=["message", "channel_post"])
-        webhook_info = await bot_app.bot.get_webhook_info()
-        if webhook_info.url != webhook_url:
-            logger.error(f"Webhook URL mismatch: expected {webhook_url}, got {webhook_info.url}")
-            return False
-        logger.info(f"Webhook set successfully: {webhook_url}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to set webhook: {e}")
-        return False
-
-async def polling_fallback(bot_app: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("Starting polling fallback")
-    try:
-        if not bot_app.running:
-            await bot_app.initialize()
-            await bot_app.start()
-            await bot_app.updater.start_polling(
-                poll_interval=3,
-                timeout=10,
-                drop_pending_updates=True,
-                error_callback=lambda e: logger.error(f"Polling error: {e}")
-            )
-            logger.info("Polling started successfully")
-        else:
-            logger.warning("Bot already running")
-    except Exception as e:
-        logger.error(f"Polling error: {e}")
-        await asyncio.sleep(10)
-    finally:
-        if bot_app.running:
-            try:
-                await bot_app.updater.stop()
-                await bot_app.stop()
-                await bot_app.shutdown()
-                logger.info("Polling stopped")
-            except Exception as e:
-                logger.error(f"Error stopping polling: {e}")
-
 def is_admin(update: Update) -> bool:
     return str(update.effective_user.id) == ADMIN_USER_ID
 
@@ -483,7 +431,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "/stats - View marketplace stats\n"
             "/status - Check tracking status\n"
             "/test - Test listing and sale notifications\n"
-            "/noV - Test without image\n"
+            "/nov - Test without image\n"
             "/debug - Debug info\n"
             "/help - This message\n"
         ),
@@ -569,7 +517,7 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /noV command from user {update.effective_user.id} in chat {chat_id}")
+    logger.info(f"Received /nov command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -592,7 +540,7 @@ async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_message_with_retry(context, chat_id, message)
         await context.bot.send_message(chat_id=chat_id, text="✅ No-image test successful")
     except Exception as e:
-        logger.error(f"/noV error: {e}")
+        logger.error(f"/nov error: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
 
 # FastAPI app
@@ -613,30 +561,6 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    logger.info("Received POST webhook request")
-    try:
-        data = await request.json()
-        logger.debug(f"Webhook data: {json.dumps(data, indent=2)}")
-        if not bot_app or not bot_app.bot:
-            logger.error("Bot not initialized for webhook")
-            raise HTTPException(status_code=500, detail="Bot not initialized")
-        update = Update.de_json(data, bot_app.bot)
-        if update:
-            logger.info(f"Processing update: {update.update_id}")
-            await bot_app.process_update(update)
-            return {"status": "OK"}
-        else:
-            logger.error("Invalid update data received")
-            raise HTTPException(status_code=400, detail="Invalid update data")
-    except Exception as e:
-        logger.error(f"Webhook processing failed: {e}")
-        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
-        if len(recent_errors) > 5:
-            recent_errors.pop(0)
-        raise HTTPException(status_code=500, detail=f"Webhook processing failed: {e}")
 
 # Lifespan handler
 @asynccontextmanager
@@ -661,7 +585,7 @@ async def lifespan(app: FastAPI):
         ]
         for handler in handlers:
             bot_app.add_handler(handler)
-            logger.info(f"Registered handler for command /{handler.command[0]}")
+            logger.info(f"Registered handler for command /{handler.commands[0]}")
         # Set bot commands
         commands = [
             BotCommand("start", "Start the bot"),
@@ -675,12 +599,16 @@ async def lifespan(app: FastAPI):
             BotCommand("nov", "Test event without image")
         ]
         await bot_app.initialize()
+        await bot_app.start()
+        await bot_app.updater.start_polling(
+            poll_interval=3,
+            timeout=10,
+            drop_pending_updates=True,
+            error_callback=lambda e: logger.error(f"Polling error: {e}")
+        )
+        logger.info("Polling started successfully")
         await bot_app.bot.set_my_commands(commands)
         logger.info("Bot commands set successfully")
-        # Try webhook first, fallback to polling
-        if not await set_webhook_with_retry(bot_app):
-            logger.info("Webhook setup failed, starting polling")
-            await polling_fallback(bot_app)
         yield
     except Exception as e:
         logger.error(f"Startup error: {e}")
@@ -696,10 +624,10 @@ async def lifespan(app: FastAPI):
                 except asyncio.CancelledError:
                     logger.info("Monitoring task cancelled")
             if bot_app and bot_app.running:
+                await bot_app.updater.stop()
                 await bot_app.stop()
                 await bot_app.shutdown()
-                await bot_app.bot.delete_webhook(drop_pending_updates=True)
-                logger.info("Webhook deleted")
+                logger.info("Bot shutdown completed")
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
