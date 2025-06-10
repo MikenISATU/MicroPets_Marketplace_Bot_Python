@@ -1,3 +1,4 @@
+
 import os
 import logging
 import requests
@@ -10,12 +11,11 @@ from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from datetime import datetime
-from decimal import Decimal
 import telegram
 import aiohttp
 import threading
@@ -106,6 +106,7 @@ transaction_details_cache: Dict[str, float] = {}
 monitoring_task = None
 polling_task = None
 file_lock = threading.Lock()
+bot_app = None
 
 # Initialize Web3
 try:
@@ -276,7 +277,7 @@ async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock:
         await asyncio.sleep(5)
         return transaction_cache or []
 
-async def send_gif_with_retry(context, chat_id: str, gif_url: str, options: Dict, max_retries: int = 3, delay: int = 2) -> bool:
+async def send_gif_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gif_url: str, options: Dict, max_retries: int = 3, delay: int = 2) -> bool:
     if not hasattr(context, 'bot') or context.bot is None:
         logger.error(f"Bot not initialized for chat {chat_id}")
         return False
@@ -295,15 +296,15 @@ async def send_gif_with_retry(context, chat_id: str, gif_url: str, options: Dict
             logger.error(f"Failed to send GIF (attempt {i+1}/{max_retries}): {e}")
             if i == max_retries - 1:
                 await context.bot.send_message(
-                    chat_id,
-                    f"{options['caption']}\n\n⚠️ GIF unavailable",
+                    chat_id=chat_id,
+                    text=f"{options['caption']}\n\n⚠️ GIF unavailable",
                     parse_mode='Markdown'
                 )
                 return False
             await asyncio.sleep(delay)
     return False
 
-async def process_transaction(context, transaction: Dict, pets_price: float, chat_id: str = TELEGRAM_CHAT_ID) -> bool:
+async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: Dict, pets_price: float, chat_id: str = TELEGRAM_CHAT_ID) -> bool:
     global posted_transactions
     try:
         if not isinstance(transaction, dict) or 'transactionHash' not in transaction:
@@ -362,7 +363,7 @@ async def process_transaction(context, transaction: Dict, pets_price: float, cha
         logger.error(f"Error processing transaction {transaction.get('transactionHash', 'unknown')}: {e}")
         return False
 
-async def monitor_transactions(context) -> None:
+async def monitor_transactions(context: ContextTypes.DEFAULT_TYPE) -> None:
     global last_transaction_hash, last_block_number, is_tracking_enabled, monitoring_task
     logger.info("Starting marketplace transaction monitoring")
     while is_tracking_enabled:
@@ -409,13 +410,16 @@ async def set_webhook_with_retry(bot_app) -> bool:
     webhook_url = f"https://{APP_URL}/webhook"
     logger.info(f"Attempting to set webhook: {webhook_url}")
     try:
-        await asyncio.sleep(5)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://{APP_URL}/health", timeout=15) as response:
-                if response.status != 200:
-                    logger.error(f"Health check failed, status {response.status}, response: {await response.text()}")
-                    raise Exception(f"Health check failed, status {response.status}")
-                logger.info(f"Health check passed, status {response.status}")
+        # Skip health check for Railway to avoid 502 errors
+        if 'railway.app' in APP_URL:
+            logger.info("Skipping health check for Railway environment")
+        else:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://{APP_URL}/health", timeout=15) as response:
+                    if response.status != 200:
+                        logger.error(f"Health check failed, status {response.status}, response: {await response.text()}")
+                        raise Exception(f"Health check failed, status {response.status}")
+                    logger.info(f"Health check passed, status {response.status}")
         await bot_app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Deleted existing webhook")
         await bot_app.bot.set_webhook(webhook_url, allowed_updates=["message", "channel_post"])
@@ -428,49 +432,50 @@ async def set_webhook_with_retry(bot_app) -> bool:
 async def polling_fallback(bot_app) -> None:
     global polling_task
     logger.info("Starting polling fallback")
-    while True:
-        try:
-            if not bot_app.running:
-                await bot_app.initialize()
-                await bot_app.start()
-                await bot_app.updater.start_polling(
-                    poll_interval=3,
-                    timeout=10,
-                    drop_pending_updates=True,
-                    error_callback=lambda e: logger.error(f"Polling error: {e}")
-                )
-                logger.info("Polling started successfully")
-                while polling_task and not polling_task.cancelled():
-                    await asyncio.sleep(60)
-            else:
-                logger.warning("Bot already running, skipping polling start")
-                while polling_task and not polling_task.cancelled():
-                    await asyncio.sleep(60)
-        except Exception as e:
-            logger.error(f"Polling error: {e}")
-            await asyncio.sleep(10)
-        finally:
-            if bot_app.running and polling_task and polling_task.cancelled():
-                try:
-                    await bot_app.updater.stop()
-                    await bot_app.stop()
-                    await bot_app.shutdown()
-                    logger.info("Polling stopped")
-                except Exception as e:
-                    logger.error(f"Error stopping polling: {e}")
+    try:
+        if not bot_app.running:
+            await bot_app.initialize()
+            await bot_app.start()
+            await bot_app.updater.start_polling(
+                poll_interval=3,
+                timeout=10,
+                drop_pending_updates=True,
+                error_callback=lambda e: logger.error(f"Polling error: {e}")
+            )
+            logger.info("Polling started successfully")
+            while polling_task and not polling_task.cancelled():
+                await asyncio.sleep(60)
+        else:
+            logger.warning("Bot already running, skipping polling start")
+            while polling_task and not polling_task.cancelled():
+                await asyncio.sleep(60)
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+        await asyncio.sleep(10)
+    finally:
+        if bot_app.running and polling_task and polling_task.cancelled():
+            try:
+                await bot_app.updater.stop()
+                await bot_app.stop()
+                await bot_app.shutdown()
+                logger.info("Polling stopped")
+            except Exception as e:
+                logger.error(f"Error stopping polling: {e}")
 
 def is_admin(update: Update) -> bool:
     return str(update.effective_chat.id) == ADMIN_USER_ID
 
 # Command handlers
-async def start(update: Update, context) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /start command in chat {chat_id}")
     active_chats.add(str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to MicroPets Marketplace Tracker! Use /track to start NFT alerts.")
 
-async def track(update: Update, context) -> None:
+async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global is_tracking_enabled, monitoring_task
     chat_id = update.effective_chat.id
+    logger.info(f"Received /track command in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -483,9 +488,10 @@ async def track(update: Update, context) -> None:
     logger.info(f"Tracking enabled by admin in chat {chat_id}")
     await context.bot.send_message(chat_id=chat_id, text="🚖 NFT Tracking started")
 
-async def stop(update: Update, context) -> None:
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global is_tracking_enabled, monitoring_task
     chat_id = update.effective_chat.id
+    logger.info(f"Received /stop command in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -501,8 +507,9 @@ async def stop(update: Update, context) -> None:
     logger.info(f"Tracking stopped by admin in chat {chat_id}")
     await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
 
-async def stats(update: Update, context) -> None:
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /stats command in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -567,8 +574,9 @@ async def stats(update: Update, context) -> None:
         logger.error(f"Error in /stats: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"Failed to fetch data: {str(e)}")
 
-async def help_command(update: Update, context) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /help command in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -589,8 +597,9 @@ async def help_command(update: Update, context) -> None:
         parse_mode='Markdown'
     )
 
-async def status(update: Update, context) -> None:
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /status command in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -600,8 +609,9 @@ async def status(update: Update, context) -> None:
         parse_mode='Markdown'
     )
 
-async def debug(update: Update, context) -> None:
+async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /debug command in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -623,8 +633,9 @@ async def debug(update: Update, context) -> None:
         parse_mode='Markdown'
     )
 
-async def test(update: Update, context) -> None:
+async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /test command in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -662,15 +673,16 @@ async def test(update: Update, context) -> None:
         gif_url = get_gif_url('Sale') or "https://i.giphy.com/media/3o6Zt6KHxJTbXCvgaU/giphy.gif"
         success = await send_gif_with_retry(context, chat_id, gif_url, {'caption': message, 'parse_mode': 'Markdown'})
         if success:
-            await context.bot.send_message(chat_id=chat_id, text="🚖 Success")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 Test command executed successfully")
         else:
             await context.bot.send_message(chat_id=chat_id, text="🚫 Failed to send test GIF")
     except Exception as e:
         logger.error(f"Test error: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
 
-async def no_video(update: Update, context) -> None:
+async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    logger.info(f"Received /noV command in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -706,7 +718,7 @@ async def no_video(update: Update, context) -> None:
             f"[🔍 View]({tx_url})\n"
         )
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-        await context.bot.send_message(chat_id=chat_id, text="🚖 OK")
+        await context.bot.send_message(chat_id=chat_id, text="🚖 No-video test command executed successfully")
     except Exception as e:
         logger.error(f"/noV error: {e}", exc_info=True)
         await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
@@ -720,18 +732,25 @@ async def health_check():
     logger.info("Health check endpoint called")
     try:
         if not w3.is_connected():
+            logger.error("Web3 is not connected")
             raise Exception("Web3 is not connected")
         if not bot_app or not bot_app.bot:
+            logger.error("Telegram bot not initialized")
             raise Exception("Telegram bot not initialized")
         return {"status": "Connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
 
 @app.get("/webhook")
 async def webhook_get():
-    logger.info("Received GET webhook")
+    logger.info("Received GET request to /webhook")
     raise HTTPException(status_code=405, detail="Method Not Allowed")
+
+@app.get("/favicon.ico")
+async def favicon():
+    logger.info("Ignoring favicon.ico request")
+    raise HTTPException(status_code=404, detail="Favicon not available")
 
 @app.get("/api/transactions")
 async def get_transactions():
@@ -752,10 +771,13 @@ async def webhook(request: Request):
                 return {"error": "Bot not initialized"}, 500
             update = Update.de_json(data, bot_app.bot)
             if update:
+                logger.info(f"Processing update: {update.update_id}")
                 await bot_app.process_update(update)
+            else:
+                logger.warning("No valid update found in webhook data")
             return {"status": "ok"}
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"Webhook error: {e}", exc_info=True)
         recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
         if len(recent_errors) > 5:
             recent_errors.pop(0)
@@ -783,6 +805,7 @@ async def lifespan(app: FastAPI):
         await bot_app.initialize()
         try:
             await set_webhook_with_retry(bot_app)
+            global is_tracking_enabled
             is_tracking_enabled = True
             monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
             logger.info("Webhook set successfully")
@@ -795,7 +818,7 @@ async def lifespan(app: FastAPI):
         logger.info("Bot startup completed")
         yield
     except Exception as e:
-        logger.error(f"Startup error: {e}")
+        logger.error(f"Startup error: {e}", exc_info=True)
         recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
     finally:
         logger.info("Initiating bot shutdown...")
@@ -837,5 +860,5 @@ if __name__ == "__main__":
     try:
         uvicorn.run(app, host="0.0.0.0", port=PORT, reload=False)
     except Exception as e:
-        logger.error(f"Uvicorn startup failed: {e}")
+        logger.error(f"Uvicorn startup failed: {e}", exc_info=True)
         raise
