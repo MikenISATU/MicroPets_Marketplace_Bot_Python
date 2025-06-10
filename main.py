@@ -20,8 +20,6 @@ import telegram
 import aiohttp
 import threading
 from bs4 import BeautifulSoup
-import importlib.util
-import sys
 
 # Logging setup
 logging.basicConfig(
@@ -152,10 +150,10 @@ def load_posted_transactions() -> Set[str]:
             with open('posted_transactions.txt', 'r') as f:
                 return set(line.strip() for line in f if line.strip())
     except Exception as e:
-        logger.warning(f"Could not log"oad_posted_transactions.txt: {e}")
-        return {"error": set()}
+        logger.warning(f"Could not load posted_transactions.txt: {e}")
+        return set()
 
-def log_to_posted_transaction(transaction_hash: str) -> None) -> None:
+def log_posted_transaction(transaction_hash: str) -> None:
     try:
         with file_lock:
             with open('posted_transactions.txt', 'a') as f:
@@ -315,7 +313,7 @@ async def process_transaction(context, transaction: Dict, pets_price: float, cha
         if transaction_hash in posted_transactions:
             logger.info(f"Skipping already posted transaction: {transaction_hash}")
             return False
-        bnb_value = get_transaction_details(transaction_hash)
+        bnb_value = await get_transaction_details(transaction_hash)
         if bnb_value is None or bnb_value <= 0:
             logger.info(f"Skipping transaction {transaction_hash} with invalid BNB value: {bnb_value}")
             return False
@@ -527,7 +525,7 @@ async def stats(update: Update, context) -> None:
             return
         message_parts = []
         if listing_tx:
-            bnb_value = get_transaction_details(listing_tx['transactionHash']) or 0
+            bnb_value = await get_transaction_details(listing_tx['transactionHash']) or 0
             nft_amount = random.randint(1, 10)
             wallet_address = listing_tx['to']
             tx_url = f"https://bscscan.com/tx/{listing_tx['transactionHash']}"
@@ -542,7 +540,7 @@ async def stats(update: Update, context) -> None:
                 f"[🔍 View on BscScan]({tx_url})\n"
             )
         if sale_tx:
-            bnb_value = get_transaction_details(sale_tx['transactionHash']) or 0
+            bnb_value = await get_transaction_details(sale_tx['transactionHash']) or 0
             nft_amount = float(sale_tx['value']) / 1e18
             wallet_address = sale_tx['to']
             tx_url = f"https://bscscan.com/tx/{sale_tx['transactionHash']}"
@@ -713,6 +711,9 @@ async def no_video(update: Update, context) -> None:
         logger.error(f"/noV error: {e}", exc_info=True)
         await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
 
+# FastAPI app
+app = FastAPI()
+
 # FastAPI routes
 @app.get("/health")
 async def health_check():
@@ -826,14 +827,15 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
+# Attach lifespan to FastAPI app
 app = FastAPI(lifespan=lifespan)
 
-# Ensure module is importable
+# Main entry point
 if __name__ == "__main__":
     import uvicorn
     logger.info(f"Starting Uvicorn server on port {PORT}")
     try:
-        uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
+        uvicorn.run(app, host="0.0.0.0", port=PORT, reload=False)
     except Exception as e:
         logger.error(f"Uvicorn startup failed: {e}")
         raise
