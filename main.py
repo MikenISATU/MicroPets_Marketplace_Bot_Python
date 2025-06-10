@@ -131,7 +131,7 @@ async def initialize_last_block_number():
 def shorten_address(address: str) -> str:
     return f"{address[:6]}...{address[-4:]}" if address and Web3.is_address(address) else ''
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+@retry(wait=wait_exponential(multiplier=2, min=4, max=60), stop=stop_after_attempt(5))
 def get_pets_price_from_geckoterminal(timestamp: int) -> Optional[float]:
     try:
         headers = {'Accept': 'application/json;version=20230302'}
@@ -154,7 +154,7 @@ def get_pets_price_from_geckoterminal(timestamp: int) -> Optional[float]:
         logger.error(f"Geckoterminal $PETS price fetch failed: {e}")
         return None
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+@retry(wait=wait_exponential(multiplier=2, min=4, max=60), stop=stop_after_attempt(5))
 def get_bnb_price_from_geckoterminal(timestamp: int) -> Optional[float]:
     try:
         headers = {'Accept': 'application/json;version=20230302'}
@@ -191,7 +191,7 @@ async def fetch_nft_metadata(token_id: str) -> Dict:
         logger.error(f"Failed to fetch NFT metadata for token {token_id}: {e}")
         return {"name": f"Unnamed NFT #{token_id}", "image": NFT_IMAGE_URL}
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+@retry(wait=wait_exponential(multiplier=2, min=4, max=60), stop=stop_after_attempt(5))
 async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] = None) -> List[Dict]:
     global last_block_number
     try:
@@ -199,15 +199,24 @@ async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] =
             startblock = last_block_number + 1
         latest_block = w3.eth.block_number
         if not startblock:
-            startblock = max(0, latest_block - 1000)  # Look back 1000 blocks for recent events
+            startblock = max(0, latest_block - 1000)
         if not endblock:
             endblock = latest_block
         logger.info(f"Fetching logs from block {startblock} to {endblock}")
-        logs = w3.eth.get_logs({
-            "fromBlock": startblock,
-            "toBlock": endblock,
-            "address": CONTRACT_ADDRESS
-        })
+        logs = []
+        while startblock <= endblock:
+            current_endblock = min(startblock + 999, endblock)  # Limit to 1000 blocks per request
+            try:
+                batch_logs = w3.eth.get_logs({
+                    "fromBlock": startblock,
+                    "toBlock": current_endblock,
+                    "address": CONTRACT_ADDRESS
+                })
+                logs.extend(batch_logs)
+            except Exception as e:
+                logger.error(f"Partial fetch failed for range {startblock}-{current_endblock}: {e}")
+                break
+            startblock = current_endblock + 1
         events = [
             {
                 'transactionHash': log['transactionHash'].hex(),
@@ -447,9 +456,8 @@ async def stats(update: Update, context) -> None:
         if not events:
             await context.bot.send_message(chat_id=chat_id, text="🚫 No events found")
             return
-        recent_events = sorted(events, key=lambda x: x['blockNumber'], reverse=True)[:2]  # Latest listing and sale
-        latest_listing = next((e for e in recent_events if e['topics'][0] == ADD_PUBLIC_LISTING_V2_SELECTOR), None)
-        latest_sale = next((e for e in recent_events if e['topics'][0] == SETTLE_PUBLIC_LISTING_V2_SELECTOR), None)
+        latest_listing = next((e for e in reversed(events) if e['topics'][0] == ADD_PUBLIC_LISTING_V2_SELECTOR), None)
+        latest_sale = next((e for e in reversed(events) if e['topics'][0] == SETTLE_PUBLIC_LISTING_V2_SELECTOR), None)
         message_parts = ["📊 *Latest Marketplace Stats*"]
         if latest_listing:
             metadata = await fetch_nft_metadata(latest_listing['tokenId'])
@@ -490,6 +498,7 @@ async def help_command(update: Update, context) -> None:
             "/track - Enable alerts\n"
             "/stop - Disable alerts\n"
             "/stats - Show latest marketplace stats\n"
+            "/test - Test notifications\n"
             "/help - This help\n"
         ),
         parse_mode='Markdown'
@@ -530,6 +539,57 @@ async def debug(update: Update, context) -> None:
         text=f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```",
         parse_mode='Markdown'
     )
+
+async def test(update: Update, context) -> None:
+    chat_id = update.effective_chat.id
+    logger.info(f"Received /test command from chat {chat_id}")
+    if not is_admin(update):
+        logger.warning(f"Unauthorized /test attempt from chat {chat_id}")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        return
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test events (listing and sale)...")
+    try:
+        timestamp = int(time.time())
+        pets_price = get_pets_price_from_geckoterminal(timestamp) or 0.00003886
+        bnb_price = get_bnb_price_from_geckoterminal(timestamp) or 600
+        image_url = NFT_IMAGE_URL  # Using placeholder for test
+        nft_name = "Test NFT"
+
+        # Test Listing
+        test_pets_amount = random.randint(1000000, 5000000)
+        usd_value = test_pets_amount * pets_price
+        bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
+        listing_message = (
+            f"🔥 *New Listing Notification* 🔥\n\n"
+            f"1x {nft_name}\n"
+            f"Listed for: {test_pets_amount:,.0f} $PETS (${usd_value:.2f}/{bnb_value:.3f} BNB)\n"
+            f"Get it on the Marketplace 🎁 now before it's gone! 👀\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+        )
+        success = await send_message_with_retry(context.bot, chat_id, listing_message, image_url)
+        if not success:
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Listing test failed: Unable to send notification")
+            return
+
+        # Test Sale
+        test_pets_amount = random.randint(1000000, 5000000)
+        usd_value = test_pets_amount * pets_price
+        bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
+        sale_message = (
+            f"🌸 *3D NFT Sold!* 🌸\n\n"
+            f"Sold: 1x {nft_name}\n"
+            f"Sold for: {test_pets_amount:,.0f} $PETS (${usd_value:.2f}/{bnb_value:.3f} BNB)\n"
+            f"Worth: 0.13 BNB (${usd_value:.2f})\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+        )
+        success = await send_message_with_retry(context.bot, chat_id, sale_message, image_url)
+        if success:
+            await context.bot.send_message(chat_id=chat_id, text="✅ Both tests successful")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Sale test failed: Unable to send notification")
+    except Exception as e:
+        logger.error(f"Test error: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
 
 # FastAPI routes
 app = FastAPI()
@@ -587,12 +647,14 @@ async def lifespan(app: FastAPI):
         bot_app.add_handler(CommandHandler("help", help_command))
         bot_app.add_handler(CommandHandler("status", status))
         bot_app.add_handler(CommandHandler("debug", debug))
+        bot_app.add_handler(CommandHandler("test", test))
         await bot_app.initialize()
         commands = [
             BotCommand(command="start", description="Start the bot"),
             BotCommand(command="track", description="Start tracking events"),
             BotCommand(command="stop", description="Stop tracking events"),
             BotCommand(command="stats", description="Show latest marketplace stats"),
+            BotCommand(command="test", description="Test notifications"),
             BotCommand(command="help", description="Show commands"),
             BotCommand(command="status", description="Check bot status"),
             BotCommand(command="debug", description="Show debug info")
