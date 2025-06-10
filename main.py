@@ -14,11 +14,12 @@ from telegram.ext import ApplicationBuilder, CommandHandler
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 import telegram
 import aiohttp
 import threading
+from bs4 import BeautifulSoup
 
 # Logging setup
 logging.basicConfig(
@@ -40,7 +41,6 @@ if not telegram.__version__.startswith('20'):
 # Load environment variables
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
 APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 BNB_RPC_URL = os.getenv('BNB_RPC_URL')
@@ -56,7 +56,6 @@ POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
 missing_vars = []
 for var, name in [
     (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
-    (CLOUDINARY_CLOUD_NAME, 'CLOUDINARY_CLOUD_NAME'),
     (APP_URL, 'APP_URL/RAILWAY_PUBLIC_DOMAIN'),
     (BSCSCAN_API_KEY, 'BSCSCAN_API_KEY'),
     (BNB_RPC_URL, 'BNB_RPC_URL'),
@@ -83,10 +82,7 @@ if not COINMARKETCAP_API_KEY:
 logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
 
 # Constants
-cloudinary_videos = {
-    'Listing': 'SMALLBUY_b3px1p',
-    'Sale': 'micropets_big_msapxz'
-}
+BASE_URL = "https://element.market/collections/micropetsnewerabnb-5414f1c9?search[toggles][0]=ALL"
 
 # In-memory data
 transaction_cache: List[Dict] = []
@@ -118,11 +114,22 @@ except Exception as e:
     logger.info("Web3 initialized with fallback")
 
 # Helper functions
-def get_video_url(category: str) -> str:
-    public_id = cloudinary_videos.get(category, 'micropets_big_msapxz')
-    video_url = f"https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/video/upload/v1/{public_id}.mp4"
-    logger.info(f"Generated video URL for {category}: {video_url}")
-    return video_url
+def get_gif_url(category: str) -> str:
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(BASE_URL, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        gif_elements = soup.find_all('img', src=lambda x: x and x.endswith('.gif'))
+        if gif_elements:
+            return random.choice(gif_elements)['src']
+        logger.warning("No GIFs found on the page, using fallback")
+        return "https://via.placeholder.com/150.gif?text=NFT+GIF"
+    except Exception as e:
+        logger.error(f"Failed to scrape GIF URL: {e}")
+        return "https://via.placeholder.com/150.gif?text=NFT+GIF"
 
 def shorten_address(address: str) -> str:
     return f"{address[:6]}...{address[-4:]}" if address and Web3.is_address(address) else ''
@@ -237,7 +244,7 @@ async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock:
                 'input': tx.get('input', '')
             }
             for tx in data['result']
-            if tx['input'] and ('list' in tx['input'].lower() or 'buy' in tx['input'].lower())
+            if tx['input'] and ('list' in tx['input'].lower() or 'buy' in tx['input'].lower')
         ]
         if transactions and not startblock:
             last_block_number = max(tx['blockNumber'] for tx in transactions)
@@ -253,24 +260,24 @@ async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock:
         await asyncio.sleep(5)  # Retry delay for RPC issues
         return transaction_cache or []
 
-async def send_video_with_retry(context, chat_id: str, video_url: str, options: Dict, max_retries: int = 3, delay: int = 2) -> bool:
+async def send_gif_with_retry(context, chat_id: str, gif_url: str, options: Dict, max_retries: int = 3, delay: int = 2) -> bool:
     for i in range(max_retries):
         try:
-            logger.info(f"Attempt {i+1}/{max_retries} to send video to chat {chat_id}: {video_url}")
+            logger.info(f"Attempt {i+1}/{max_retries} to send GIF to chat {chat_id}: {gif_url}")
             async with aiohttp.ClientSession() as session:
-                async with session.head(video_url, timeout=5) as head_response:
+                async with session.head(gif_url, timeout=5) as head_response:
                     if head_response.status != 200:
-                        logger.error(f"Video URL inaccessible, status {head_response.status}: {video_url}")
-                        raise Exception(f"Video URL inaccessible, status {head_response.status}")
-            await context.bot.send_video(chat_id=chat_id, video=video_url, **options)
-            logger.info(f"Successfully sent video to chat {chat_id}")
+                        logger.error(f"GIF URL inaccessible, status {head_response.status}: {gif_url}")
+                        raise Exception(f"GIF URL inaccessible, status {head_response.status}")
+            await context.bot.send_animation(chat_id=chat_id, animation=gif_url, **options)
+            logger.info(f"Successfully sent GIF to chat {chat_id}")
             return True
         except Exception as e:
-            logger.error(f"Failed to send video (attempt {i+1}/{max_retries}): {e}")
+            logger.error(f"Failed to send GIF (attempt {i+1}/{max_retries}): {e}")
             if i == max_retries - 1:
                 await context.bot.send_message(
                     chat_id,
-                    f"{options['caption']}\n\n⚠️ Video unavailable",
+                    f"{options['caption']}\n\n⚠️ GIF unavailable",
                     parse_mode='Markdown'
                 )
                 return False
@@ -297,7 +304,7 @@ async def process_transaction(context, transaction: Dict, pets_price: float, cha
         wallet_address = transaction['to']
         tx_url = f"https://bscscan.com/tx/{transaction['transactionHash']}"
         category = 'Sale' if is_sale else 'Listing'
-        video_url = get_video_url(category)
+        gif_url = get_gif_url(category)
         emoji_count = min(int(usd_value) // 100 if is_sale else 10, 100)
         emojis = '💰' * emoji_count
         # Use 2,943,823 $PETS for Worth calculation in sales
@@ -322,7 +329,7 @@ async def process_transaction(context, transaction: Dict, pets_price: float, cha
                 f"🦑 Buyer: {shorten_address(wallet_address)}\n"
                 f"[🔍 View on BscScan]({tx_url})\n"
             )
-        success = await send_video_with_retry(context, chat_id, video_url, {'caption': message, 'parse_mode': 'Markdown'})
+        success = await send_gif_with_retry(context, chat_id, gif_url, {'caption': message, 'parse_mode': 'Markdown'})
         if success:
             posted_transactions.add(transaction['transactionHash'])
             log_posted_transaction(transaction['transactionHash'])
@@ -524,8 +531,8 @@ async def stats(update: Update, context) -> None:
             )
         if message_parts:
             full_message = "\n".join(message_parts)
-            video_url = get_video_url('Sale' if sale_tx else 'Listing')
-            await send_video_with_retry(context, chat_id, video_url, {'caption': full_message, 'parse_mode': 'Markdown'})
+            gif_url = get_gif_url('Sale' if sale_tx else 'Listing')
+            await send_gif_with_retry(context, chat_id, gif_url, {'caption': full_message, 'parse_mode': 'Markdown'})
         else:
             await context.bot.send_message(chat_id=chat_id, text="🚫 No valid data to display")
     except Exception as e:
@@ -621,8 +628,8 @@ async def test(update: Update, context) -> None:
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n"
         )
-        video_url = get_video_url('Sale')
-        await send_video_with_retry(context, chat_id, video_url, {'caption': message, 'parse_mode': 'Markdown'})
+        gif_url = get_gif_url('Sale')
+        await send_gif_with_retry(context, chat_id, gif_url, {'caption': message, 'parse_mode': 'Markdown'})
         await context.bot.send_message(chat_id=chat_id, text="🚖 Success")
     except Exception as e:
         logger.error(f"Test error: {e}")
