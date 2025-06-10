@@ -299,24 +299,25 @@ async def process_transaction(context, transaction: Dict, pets_price: float, cha
     global posted_transactions
     try:
         if not isinstance(transaction, dict) or 'transactionHash' not in transaction:
-            logger.error(f"Invalid transaction format: {transaction_hash}")
+            logger.error(f"Invalid transaction format: {transaction}")
             return False
-        if transaction['transactionHash'] in posted_transactions:
-            logger.info(f"Skipping already posted transaction: {transaction['transactionHash']}")
+        transaction_hash = transaction['transactionHash']
+        if transaction_hash in posted_transactions:
+            logger.info(f"Skipping already posted transaction: {transaction_hash}")
             return False
-        bnb_value = get_transaction_details(transaction['transactionHash'])
+        bnb_value = get_transaction_details(transaction_hash)
         if bnb_value is None or bnb_value <= 0:
-            logger.info(f"Skipping transaction {transaction['transactionHash']} with invalid BNB value: {bnb_value}")
+            logger.info(f"Skipping transaction {transaction_hash} with invalid BNB value: {bnb_value}")
             return False
         is_listing = 'list' in transaction['input'].lower() and not transaction['isError']
         is_sale = 'buy' in transaction['input'].lower() and not transaction['isError']
         if not (is_listing or is_sale):
-            logger.info(f"Skipping transaction {transaction}['transactionHash']} - not a listing or sale")
+            logger.info(f"Skipping transaction {transaction_hash} - not a listing or sale")
             return False
         nft_amount = float(transaction['value']) / 1e18 if is_sale else random.randint(1, 10)
         usd_value = nft_amount * pets_price * 1000000 if is_sale else 0
         wallet_address = transaction['to']
-        tx_url = f"https://bscscan.com/tx/{transaction['transactionHash']}"
+        tx_url = f"https://bscscan.com/tx/{transaction_hash}"
         category = 'Sale' if is_sale else 'Listing'
         gif_url = get_gif_url(category)
         emoji_count = min(int(usd_value) // 100 if is_sale else 10, 100)
@@ -344,9 +345,9 @@ async def process_transaction(context, transaction: Dict, pets_price: float, cha
             )
         success = await send_gif_with_retry(context, chat_id, gif_url, {'caption': message, 'parse_mode': 'Markdown'})
         if success:
-            posted_transactions.add(transaction['transactionHash'])
-            log_posted_transaction(transaction['transactionHash'])
-            logger.info(f"Processed transaction {transaction['transactionHash']} for chat {chat_id}")
+            posted_transactions.add(transaction_hash)
+            log_posted_transaction(transaction_hash)
+            logger.info(f"Processed transaction {transaction_hash} for chat {chat_id}")
             return True
         return False
     except Exception as e:
