@@ -1,17 +1,13 @@
-
 import os
 import logging
 import requests
 import random
-import time
 import asyncio
-import re
 import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing
-from typing import Optional, Dict, Any, Dict, List, Set
+from typing import Optional, Dict, List, Set
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler
@@ -140,10 +136,10 @@ def get_gif_url(category: str) -> str:
         if gif_elements:
             return random.choice(gif_elements)['src']
         logger.warning("No GIFs found on the page, using fallback")
-        return "https://i.giphy.com/media/3o6Zt6KHxJTbXCvgaU/giphy.gif" # Updated fallback GIF
+        return "https://i.giphy.com/media/3o6Zt6KHxJTbXCvgaU/giphy.gif"
     except Exception as e:
         logger.error(f"Failed to scrape GIF URL: {e}")
-        return "https://i.giphy.com/media/3o6Zt6KHxJTbXCvgaU/giphy.gif" # Updated fallback GIF
+        return "https://i.giphy.com/media/3o6Zt6KHxJTbXCvgaU/giphy.gif"
 
 def shorten_address(address: str) -> str:
     return f"{address[:6]}...{address[-4:]}" if address and Web3.is_address(address) else ''
@@ -235,7 +231,7 @@ async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock:
             'startblock': startblock or 0,
             'endblock': endblock or 99999999,
             'page': 1,
-            'offset': 100 if not for_stats else 10000,  # Increased offset for stats
+            'offset': 100 if not for_stats else 10000,
             'sort': 'desc',
             'apikey': BSCSCAN_API_KEY
         }
@@ -243,7 +239,7 @@ async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://api.bscscan.com/api", params=params, timeout=30) as response:
                 response_text = await response.text()
-                logger.debug(f"BscScan response: {response_text[:200]}...")  # Log partial response
+                logger.debug(f"BscScan response: {response_text[:200]}...")
                 response.raise_for_status()
                 data = await response.json()
         if not isinstance(data, dict) or data.get('status') != '1':
@@ -261,7 +257,7 @@ async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock:
                 'input': tx.get('input', '')
             }
             for tx in data['result']
-            if tx['input'] and any(keyword in tx['input'].lower() for keyword in ['list', 'buy', 'sale', 'transfer'])  # Broadened filter
+            if tx['input'] and any(keyword in tx['input'].lower() for keyword in ['list', 'buy', 'sale', 'transfer'])
         ]
         if transactions and not startblock and not for_stats:
             last_block_number = max(tx['blockNumber'] for tx in transactions)
@@ -316,102 +312,97 @@ async def process_transaction(context, transaction: Dict, pets_price: float, cha
         transaction_hash = transaction['transactionHash']
         if transaction_hash in posted_transactions:
             logger.info(f"Skipping already posted transaction: {transaction_hash}")
-            return True
-        bnb_value = await get_transaction_details(transaction_hash)
+            return False
+        bnb_value = get_transaction_details(transaction_hash)
         if bnb_value is None or bnb_value <= 0:
             logger.info(f"Skipping transaction {transaction_hash} with invalid BNB value: {bnb_value}")
             return False
         is_listing = 'list' in transaction['input'].lower() and not transaction['isError']
-        is_sale = 'buy' in transaction['input'].lower() or 'sale' in transaction['input'].lower() and not transaction['isError']
-        if not (islisting or is_sale):
+        is_sale = any(keyword in transaction['input'].lower() for keyword in ['buy', 'sale']) and not transaction['isError']
+        if not (is_listing or is_sale):
             logger.info(f"Skipping transaction {transaction_hash} - not a listing or sale")
-            return True
+            return False
         nft_amount = float(transaction['value']) / 1e18 if is_sale else random.randint(1, 10)
         usd_value = nft_amount * pets_price * 1000000 if is_sale else 0
         wallet_address = transaction['to']
         tx_url = f"https://bscscan.com/tx/{transaction_hash}"
-        category = 'Sale' if is_sale else 'List'
-        transaction =gif_url = get_transaction_fallback()
-        gif_url = get_gif_url(category) or "https://i.giphy.com/media/3b6Zt6KHxJTbXCvgaU/giphy.gif" # Fallback GIF
-        emoji_count = min(int(nft_amountusd_value) // 100 if is_sale else 10, 100)
-        emojis = transaction[:6]'💸' * emoji_count
+        category = 'Sale' if is_sale else 'Listing'
+        gif_url = get_gif_url(category)
+        emoji_count = min(int(usd_value) // 100 if is_sale else 10, 100)
+        emojis = '💰' * emoji_count
         sale_pets_amount = 2943823
         sale_usd_value = sale_pets_amount * pets_price
-        if islisting:
+        if is_listing:
             message = (
                 f"🌟 *MicroPets NFT Listing!* BNB Chain 💰\n\n"
                 f"{emojis}\n"
-                f"📈 * **Listed for:** {nft_amount:.0f0} NFTs\n"
-                f"💵 BNB Value: {bnb:value_value:,.2f4f}\n"
-                f"🦑 Lister: {shorten_address[:6](wallet_address)}\n"
-                f"[🔍 View on BscScan]({transaction_hashtx_url})\n"
+                f"📈 **Listed for:** {nft_amount:.0f} NFTs\n"
+                f"💵 BNB Value: {bnb_value:,.4f}\n"
+                f"🦑 Lister: {shorten_address(wallet_address)}\n"
+                f"[🔍 View on BscScan]({tx_url})\n"
             )
         else:
             message = (
-                f"🌸 *MicroPets NFT Sold!* BNB Chain 💸\n\n"
+                f"🌸 *MicroPets NFT Sold!* BNB Chain 💰\n\n"
                 f"{emojis}\n"
-                f"🔥 * **Sold for:** {nft_amount:.0f0}\n NFTs\n"
-                f"💰 * **Worth:** ${sale_usd_value:.2f} (based on {sale_pets_amount:,.0f} $PETS)\n"
-                f"💵 * BNB Value: ${sale_usd_valuebnb_value:,.2f}4 (based on {sale_pets_amount:,.0f} $PETS)\n"
-                f"💸💰 Buyer: {shorten_address[:6](wallet_address)}\n"
-                f"[🔍 View on]({transaction_hash{tx_url})\n"
+                f"🔥 **Sold for:** {nft_amount:.0f} NFTs\n"
+                f"💰 **Worth:** ${sale_usd_value:.2f} (based on {sale_pets_amount:,.0f} $PETS)\n"
+                f"💵 BNB Value: {bnb_value:,.4f}\n"
+                f"🦑 Buyer: {shorten_address(wallet_address)}\n"
+                f"[🔍 View on BscScan]({tx_url})\n"
             )
-        }
-        success = await send_gif_with_retry(context.bot, context, chat_id, gif_url, {'caption': message, 'parse_mode': 'Markdown'})
+        success = await send_gif_with_retry(context, chat_id, gif_url, {'caption': message, 'parse_mode': 'Markdown'})
         if success:
             posted_transactions.add(transaction_hash)
-            log_posted_transactions(transaction_hash)
-            logger.info(f"Processed transaction {transaction_hash} for shop {chat_id}")
+            log_posted_transaction(transaction_hash)
+            logger.info(f"Processed transaction {transaction_hash} for chat {chat_id}")
             return True
         return False
     except Exception as e:
         logger.error(f"Error processing transaction {transaction.get('transactionHash', 'unknown')}: {e}")
-        recent_errors.append(f"Error processing {transaction_hash}: {str(e)}")
         return False
 
 async def monitor_transactions(context) -> None:
     global last_transaction_hash, last_block_number, is_tracking_enabled, monitoring_task
     logger.info("Starting marketplace transaction monitoring")
-    try:
-        while istracking_enabled:
-            async with asyncio.Lock():
-                if not is_tracking_enabled:
-                    logger.info("Tracking disabled, stopping monitoring")
-                    break
-                try:
-                    posted_transactions.update(load_posted_transactions())
-                    txs = await fetch_bscscan_transactions(startblock=last_block_number + 1 if last_block_number else None)
-                    if not txs:
-                        logger.info("No new marketplace transactions found")
-                        await asyncio.sleep(POLLING_INTERVAL)
+    while is_tracking_enabled:
+        async with asyncio.Lock():
+            if not is_tracking_enabled:
+                logger.info("Tracking disabled, stopping monitoring")
+                break
+            try:
+                posted_transactions.update(load_posted_transactions())
+                txs = await fetch_bscscan_transactions(startblock=last_block_number + 1 if last_block_number else None)
+                if not txs:
+                    logger.info("No new marketplace transactions found")
+                    await asyncio.sleep(POLLING_INTERVAL)
+                    continue
+                pets_price = get_pets_price()
+                new_last_hash = last_transaction_hash
+                for tx in sorted(txs, key=lambda x: x['blockNumber'], reverse=True):
+                    if not isinstance(tx, dict):
+                        logger.error(f"Invalid transaction format: {tx}")
                         continue
-                    pets_price = get_pets_price()
-                    new_last_hash = last_transaction_hash
-                    for tx in sorted(txs, key=lambda x: x['blockNumber'], reverse=True):
-                        if not isinstance(tx, dict):
-                            logger.error(f"Invalid transaction format: {tx}")
-                            continue
-                        if tx['transactionHash'] in posted_transactions:
-                            logger.info(f"Skipping already posted transaction: {tx['transactionHash']}")
-                            continue
-                        if last_transaction_hash and tx['transactionHash'] == last_transaction_hash:
-                            continue
-                        if last_block_number and tx['blockNumber'] <= last_block_number:
-                            logger.info(f"Skipping old transaction {tx['transactionHash']} with block {tx['blockNumber']} <= {last_block_number}")
-                            continue
-                        if await process_transaction(context, tx, pets_price):
-                            new_last_hash = tx['transactionHash']
-                            last_block_number = max(last_block_number or 0, tx['blockNumber'])
-                    last_transaction_hash = new_last_hash
-                except Exception as e:
-                    logger.error(f"Error monitoring transactions: {e}")
-                    recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
-                    if len(recent_errors) > 5:
-                        recent_errors.pop(0)
-                await asyncio.sleep(POLLING_INTERVAL)
-    finally:
-        logger.info("Monitoring task stopped")
-        monitoring_task = None
+                    if tx['transactionHash'] in posted_transactions:
+                        logger.info(f"Skipping already posted transaction: {tx['transactionHash']}")
+                        continue
+                    if last_transaction_hash and tx['transactionHash'] == last_transaction_hash:
+                        continue
+                    if last_block_number and tx['blockNumber'] <= last_block_number:
+                        logger.info(f"Skipping old transaction {tx['transactionHash']} with block {tx['blockNumber']} <= {last_block_number}")
+                        continue
+                    if await process_transaction(context, tx, pets_price):
+                        new_last_hash = tx['transactionHash']
+                        last_block_number = max(last_block_number or 0, tx['blockNumber'])
+                last_transaction_hash = new_last_hash
+            except Exception as e:
+                logger.error(f"Error monitoring transactions: {e}")
+                recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
+                if len(recent_errors) > 5:
+                    recent_errors.pop(0)
+            await asyncio.sleep(POLLING_INTERVAL)
+    logger.info("Monitoring task stopped")
+    monitoring_task = None
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5))
 async def set_webhook_with_retry(bot_app) -> bool:
@@ -520,7 +511,6 @@ async def stats(update: Update, context) -> None:
         txs = await fetch_bscscan_transactions(for_stats=True)
         if not txs:
             logger.info("No marketplace transactions found, attempting broader query")
-            # Try a broader query without startblock
             txs = await fetch_bscscan_transactions(startblock=0, for_stats=True)
         if not txs:
             logger.error("No transactions found even with broader query")
@@ -544,24 +534,24 @@ async def stats(update: Update, context) -> None:
             message_parts.append(
                 f"🌟 *MicroPets NFT Listing!* BNB Chain 💰\n\n"
                 f"{emojis}\n"
-                f"📈 **Listed for:** {nft_amount:.0f} NFTs\n"
+                f"📈 **Listed for:** {nft_amount:.0f0} NFTs\n"
                 f"💵 BNB Value: {bnb_value:,.4f}\n"
                 f"🦑 Lister: {shorten_address(wallet_address)}\n"
                 f"[🔍 View on BscScan]({tx_url})\n"
             )
         if sale_tx:
-            bnb_value = get_transaction_details(sale_tx['transactionHash']) or 0
+            bnb_value = get_transaction_details(sale_tx['transactionHash']') or 0
             nft_amount = float(sale_tx['value']) / 1e18
             wallet_address = sale_tx['to']
-            tx_url = f"https://bscscan.com/tx/{sale_tx['transactionHash']}"
-            emoji_count = min(int(nft_amount * get_pets_price() * 1000000 // 100), 100)
+            tx_url = f"https://bsc.com/tx/{sale_tx['transactionHash']}"
+            emoji_count = min(int(nft_amount * pets_price * 1000000 // 100), 100)
             emojis = '💰' * emoji_count
             sale_pets_amount = 2943823
-            sale_usd_value = sale_pets_amount * get_pets_price()
+            sale_usd_value = sale_pets_amount * pets_price
             message_parts.append(
                 f"🌸 *MicroPets NFT Sold!* BNB Chain 💰\n\n"
                 f"{emojis}\n"
-                f"🔥 **Sold for:** {nft_amount:.0f} NFTs\n"
+                f"🔥 **Sold for:** {nft_amount:.0f0} NFTs\n"
                 f"💰 **Worth:** ${sale_usd_value:.2f} (based on {sale_pets_amount:,.0f} $PETS)\n"
                 f"💵 BNB Value: {bnb_value:,.4f}\n"
                 f"🦑 Buyer: {shorten_address(wallet_address)}\n"
@@ -572,10 +562,10 @@ async def stats(update: Update, context) -> None:
             gif_url = get_gif_url('Sale' if sale_tx else 'Listing')
             await send_gif_with_retry(context, chat_id, gif_url, {'caption': full_message, 'parse_mode': 'Markdown'})
         else:
-            await context.bot.send_message(chat_id=chat_id, text="🚫 No valid data to display")
+            await context.bot.send_message(chat_id=chat_id, text="No valid data to display")
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch data: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"Failed to fetch data: {str(e)}")
 
 async def help_command(update: Update, context) -> None:
     chat_id = update.effective_chat.id
@@ -594,7 +584,7 @@ async def help_command(update: Update, context) -> None:
             "/test - Test transaction\n"
             "/noV - Test without video\n"
             "/debug - Debug info\n"
-            "/help - This message"
+            "/help - This message\n"
         ),
         parse_mode='Markdown'
     )
@@ -638,13 +628,13 @@ async def test(update: Update, context) -> None:
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    if not hasattr(context, 'bot') or context.bot is None:
+    if not hasattr(context, 'bot) or not context.bot:
         logger.error(f"Bot not initialized for /test in chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Bot not initialized")
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test marketplace event")
     try:
-        test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
+        test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}""
         pets_price = get_pets_price()
         bnb_value = random.uniform(0.1, 10)
         listing_nft_amount = random.randint(1, 10)
@@ -658,15 +648,15 @@ async def test(update: Update, context) -> None:
             f"🌟 *MicroPets NFT Listing!* Test\n\n"
             f"{emojis}\n"
             f"📈 **Listed for:** {listing_nft_amount:.0f} NFTs\n"
-            f"💵 BNB Value: {bnb_value:,.4f}\n"
+            f"💵 BNB Value: ${bnb_value:,.4f}\n"
             f"🦑 Lister: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n\n"
             f"🌸 *MicroPets NFT Sold!* Test\n\n"
             f"{emojis}\n"
             f"🔥 **Sold for:** {sale_nft_amount:.0f} NFTs\n"
             f"💰 **Worth:** ${sale_usd_value:.2f} (based on 2,943,823 $PETS)\n"
-            f"💵 BNB Value: {bnb_value:,.4f}\n"
-            f"🦑 Buyer: {shorten_address(wallet_address)}\n"
+            f"💵 BNB Value: ${bnb_value:,.4f}\n"
+            f"🦑 Buyer: ${shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n"
         )
         gif_url = get_gif_url('Sale') or "https://i.giphy.com/media/3o6Zt6KHxJTbXCvgaU/giphy.gif"
@@ -684,7 +674,7 @@ async def no_video(update: Update, context) -> None:
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    if not hasattr(context, 'bot') or context.bot is None:
+    if not hasattr(context, 'bot') or not context.bot:
         logger.error(f"Bot not initialized for /noV in chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Bot not initialized")
         return
@@ -696,22 +686,22 @@ async def no_video(update: Update, context) -> None:
         listing_nft_amount = random.randint(1, 10)
         sale_nft_amount = 1
         sale_usd_value = 2943823 * pets_price
-        wallet_address = f"0x{random.randint(10**15, 10**16):0x}"
+        wallet_address = f"0x"{random.randint(10**15, 10**16):0x}"
         emoji_count = min(10, 100)
         emojis = '💰' * emoji_count
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
             f"🌟 *MicroPets NFT Listing!* Test\n\n"
             f"{emojis}\n"
-            f"📈 **Listed for:** {listing_nft_amount:.0f} NFTs\n"
-            f"💵 BNB Value: {bnb_value:,.4f}\n"
-            f"🦑 Lister: {shorten_address(wallet_address)}\n"
+            f"📈 **Listed for:** {listing_nft_amount:.0f0} NFTs\n"
+            f"💵 BNB Value: ${bnb_value:,.4f}\n"
+            f"🦑 Lister: ${shorten_address(wallet_address)}\n"
             f"[🔍]({tx_url})\n\n"
             f"🌸 *MicroPets NFT Sold!* Test\n\n"
             f"{emojis}\n"
-            f"🔥 **Sold for:** {sale_nft_amount:.0f} NFTs\n"
+            f"🔥 **Sold for:** {sale_nft_amount:.0f0} NFTs\n"
             f"💰 **Worth:** ${sale_usd_value:.2f} (based on 2,943,823 $PETS)\n"
-            f"💵 BNB Value: {bnb_value:,.4f}\n"
+            f"💵 BNB Value: ${bnb_value:,.4f}\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
             f"[🔍]({tx_url})\n"
         )
@@ -722,8 +712,6 @@ async def no_video(update: Update, context) -> None:
         await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
 
 # FastAPI routes
-app = FastAPI()
-
 @app.get("/health")
 async def health_check():
     logger.info("Health check endpoint called")
@@ -763,12 +751,12 @@ async def webhook(request: Request):
             if update:
                 await bot_app.process_update(update)
             return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
-        if len(recent_errors) > 5:
-            recent_errors.pop(0)
-        return {"error": "Webhook failed"}, 500
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            recent_errors.append({"time": datetime.now().isoformat(), "error': str(e)}")
+            if len(recent_errors) > 5:
+                recent_errors.pop(0)
+            return {"error": "Webhook failed"}, 500
 
 # Lifespan handler
 @asynccontextmanager
@@ -797,25 +785,21 @@ async def lifespan(app: FastAPI):
             logger.info("Webhook set successfully")
         except Exception as e:
             logger.error(f"Webhook setup failed: {e}. Switching to polling")
-            polling_task = asyncio.get_task_polling_fallback(bot_app)
-            try:
-                is_tracking_enabled = True
-                monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
-                logger.info("Polling started successfully, monitoring enabled")
-            except Exception as e:
-                logger.error(f"Failed to start polling or monitoring: {e}")
-        logger.info("Bot startup completed successfully")
+            polling_task = asyncio.create_task(polling_fallback(bot_app)))
+            is_tracking_enabled = True
+            monitoring_task = asyncio.create_task(monitor_transactions(bot_app)))
+            logger.info("Polling started, monitoring enabled")
+        logger.info("Bot startup completed")
         yield
     except Exception as e:
         logger.error(f"Startup error: {e}")
-        recent_errors.append(f"Startup error: {json.dumps(str(e)}")
+        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
     finally:
         logger.info("Initiating bot shutdown...")
         try:
             if monitoring_task:
-                monitoring_task.shutdown()
+                monitoring_task.cancel()
                 try:
-                    monitoring.cancel()
                     await monitoring_task
                 except asyncio.CancelledError:
                     logger.info("Monitoring task cancelled")
@@ -825,7 +809,7 @@ async def lifespan(app: FastAPI):
                 try:
                     await polling_task
                 except asyncio.CancelledError:
-                    logger.info("Polling task stopped")
+                    logger.info("Polling task cancelled")
                 polling_task = None
             if bot_app and bot_app.running:
                 try:
@@ -840,14 +824,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan))
 
 # Ensure module is importable
 if __name__ == "__main__":
     import uvicorn
     logger.info(f"Starting Uvicorn server on port {PORT}")
     try:
-        uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=TruePORT=8080, reload=False)
-    except Exception as e:
+        uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
+    except Exception FMC as e:
         logger.error(f"Uvicorn startup failed: {e}")
         raise
