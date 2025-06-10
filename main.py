@@ -95,8 +95,8 @@ except Exception as e:
 
 # Constants
 CONTRACT_ADDRESS = Web3.to_checksum_address(CONTRACT_ADDRESS)
-ADD_PUBLIC_LISTING_SELECTOR = "0xe7bab167"  # Selector for Add Public Listing
-SETTLE_PUBLIC_LISTING_SELECTOR = "0x018bd58e"  # Selector for Settle Public Listing
+ADD_PUBLIC_LISTING_SELECTOR = "0xe7bab167"  # addPublicListing(uint256,uint256)
+SETTLE_PUBLIC_LISTING_SELECTOR = "0x018bd58e"  # settlePublicListing(uint256)
 posted_events: Set[str] = set()
 last_block_number: Optional[int] = None
 is_monitoring_enabled: bool = False
@@ -479,8 +479,7 @@ async def stats(update: Update, context) -> None:
             return
         add_count = sum(1 for e in recent_events if e['topics'][0] == ADD_PUBLIC_LISTING_SELECTOR)
         settle_count = sum(1 for e in recent_events if e['topics'][0] == SETTLE_PUBLIC_LISTING_SELECTOR)
-        total_pets = sum(int(e['value'], 16) / 1e18 for e in recent_events if e['value "Add Public Listing" if event['topics'][0] == ADD_PUBLIC_LISTING_SELECTOR else "Settle Public Listing"
-        image_url = await fetch_nft_image(event.get('tokenId', '0'))
+        total_pets = sum(int(e['value'], 16) / 1e18 for e in recent_events if e['topics'][0] in [ADD_PUBLIC_LISTING_SELECTOR, SETTLE_PUBLIC_LISTING_SELECTOR])
         timestamp = int(time.time())
         pets_price = get_pets_price_from_geckoterminal(timestamp) or 0.00003886
         bnb_price = get_bnb_price_from_geckoterminal(timestamp) or 600
@@ -493,7 +492,7 @@ async def stats(update: Update, context) -> None:
             f"💰 Total $PETS: {total_pets:,.0f} (${usd_value:.2f}/{bnb_value:.3f} BNB)\n\n"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
-        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        await send_message_with_retry(context.bot, chat_id, message, NFT_IMAGE_URL)
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch stats: {str(e)}")
