@@ -105,15 +105,29 @@ polling_task: Optional[asyncio.Task] = None
 recent_errors: List[Dict] = []
 active_chats: Set[str] = {TELEGRAM_CHAT_ID}
 
-# Static Image URLs (replace with actual hosted URLs)
-LISTING_IMAGE_URL = "https://example.com/new_listing_notification.jpg"  # Replace with actual Cloudinary URL
-SOLD_IMAGE_URL = "https://example.com/3d_nft_sold.jpg"  # Replace with actual Cloudinary URL
+# Placeholder image URLs (valid for testing)
+NFT_IMAGE_MAP = {
+    "Dog": "https://via.placeholder.com/400x400.png?text=Dog+NFT",
+    "Cat": "https://via.placeholder.com/400x400.png?text=Cat+NFT",
+    "Bird": "https://via.placeholder.com/400x400.png?text=Bird+NFT"
+}
+LISTING_IMAGE_URL = "https://via.placeholder.com/400x400.png?text=New+Listing"
+SOLD_IMAGE_URL = "https://via.placeholder.com/400x400.png?text=NFT+Sold"
 
 # Links
 MARKETPLACE_LINK = "https://pets.micropets.io/marketplace"
 CHART_LINK = "https://www.dextools.io/app/en/bnb/pair-explorer/0x4bdece4e422fa015336234e4fc4d39ae6dd75b01?t=1749434278227"
 MERCH_LINK = "https://micropets.store/"
 BUY_PETS_LINK = "https://pancakeswap.finance/swap?outputCurrency=0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3"
+
+# Initialize last_block_number
+async def initialize_last_block_number():
+    global last_block_number
+    try:
+        last_block_number = w3.eth.block_number
+        logger.info(f"Initialized last_block_number to {last_block_number}")
+    except Exception as e:
+        logger.error(f"Failed to initialize last_block_number: {e}")
 
 # Helper functions
 def shorten_address(address: str) -> str:
@@ -319,25 +333,29 @@ async def process_event(context, event: Dict) -> bool:
         usd_value = pets_amount * pets_price
         bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
         method = "Add Public Listing" if event['topics'][0] == ADD_PUBLIC_LISTING_SELECTOR else "Settle Public Listing"
+        # Simulate NFT type (in production, fetch from tokenURI)
+        nft_type = random.choice(list(NFT_IMAGE_MAP.keys()))
+        image_url = NFT_IMAGE_MAP.get(nft_type, LISTING_IMAGE_URL if method == "Add Public Listing" else SOLD_IMAGE_URL)
         block_number = event['blockNumber']
         tx_url = f"https://bscscan.com/tx/{tx_hash}"
         if method == "Add Public Listing":
             message = (
-                f"🔥 *New Listing Notification* 🔥\n\n"
-                f"1 x {method.split()[-1]} Evolved 3D NFT\n"
-                f"Listed for: {pets_amount:,.0f} $PETS\n\n"
+                f"🔥 *New {nft_type} Listing Notification* 🔥\n\n"
+                f"1 x {method.split()[-1]} Evolved 3D {nft_type} NFT\n"
+                f"Listed for: {pets_amount:,.0f} $PETS\n"
+                f"Current $PETS Price: ${pets_price:.10f} ({bnb_value:.3f} BNB)\n\n"
                 f"🚀 *Join our Ascension Alpha Group* to get this notification 60 seconds earlier and with price revealed!\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
-            image_url = LISTING_IMAGE_URL
         else:  # Settle Public Listing
             message = (
-                f"🌸 *3D NFT Sold!* 1 x {method.split()[-1]} Evolved 3D NFT\n\n"
+                f"🌸 *{nft_type} 3D NFT Sold!* 🌸\n\n"
+                f"1 x {method.split()[-1]} Evolved 3D {nft_type} NFT\n"
                 f"💰 Sold for: {pets_amount:,.0f} $PETS\n"
-                f"💳 Worth: {bnb_value:.3f} BNB (${usd_value:.2f})\n\n"
+                f"💳 Worth: {bnb_value:.3f} BNB (${usd_value:.2f})\n"
+                f"Current $PETS Price: ${pets_price:.10f}\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
-            image_url = SOLD_IMAGE_URL
         # Send to Alpha Chat ID
         success = await send_message_with_retry(context.bot, ALPHA_CHAT_ID, message, image_url)
         if not success:
@@ -486,7 +504,7 @@ async def help_command(update: Update, context) -> None:
             "/stop - Disable alerts\n"
             "/stats - Show marketplace stats\n"
             "/status - Check status\n"
-            "/test - Test event notification\n"
+            "/test - Test listing and sale notifications\n"
             "/noV - Test without image\n"
             "/debug - Debug info\n"
             "/help - This help\n"
@@ -537,26 +555,50 @@ async def test(update: Update, context) -> None:
         logger.warning(f"Unauthorized /test attempt from chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test event...")
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test events (listing and sale)...")
     try:
-        test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
+        timestamp = int(time.time())
+        pets_price = get_pets_price_from_geckoterminal(timestamp) or 0.00003886
+        bnb_price = get_bnb_price_from_geckoterminal(timestamp) or 600
+        nft_type = random.choice(list(NFT_IMAGE_MAP.keys()))
+        image_url = NFT_IMAGE_MAP.get(nft_type, LISTING_IMAGE_URL)
+
+        # Test Listing
+        test_tx_hash = f"0xTestListing{uuid.uuid4().hex[:16]}"
         test_pets_amount = random.randint(1000000, 5000000)
-        pets_price = get_pets_price_from_geckoterminal(int(time.time())) or 0.00003886
-        bnb_price = get_bnb_price_from_geckoterminal(int(time.time())) or 600
         usd_value = test_pets_amount * pets_price
         bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
-        message = (
-            f"🔥 *New Listing Notification* Test\n\n"
-            f"1 x Listing Evolved 3D NFT\n"
-            f"Listed for: {test_pets_amount:,.0f} $PETS\n\n"
+        listing_message = (
+            f"🔥 *New {nft_type} Listing Notification* Test\n\n"
+            f"1 x Listing Evolved 3D {nft_type} NFT\n"
+            f"Listed for: {test_pets_amount:,.0f} $PETS\n"
+            f"Current $PETS Price: ${pets_price:.10f} ({bnb_value:.3f} BNB)\n\n"
             f"🚀 *Join our Ascension Alpha Group* to get this notification 60 seconds earlier!\n\n"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
-        success = await send_message_with_retry(context.bot, chat_id, message, LISTING_IMAGE_URL)
+        success = await send_message_with_retry(context.bot, chat_id, listing_message, image_url)
+        if not success:
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Listing test failed: Unable to send notification")
+            return
+
+        # Test Sale
+        test_tx_hash = f"0xTestSale{uuid.uuid4().hex[:16]}"
+        test_pets_amount = random.randint(1000000, 5000000)
+        usd_value = test_pets_amount * pets_price
+        bnb_value = usd_value / bnb_price if bnb_price > 0 else 0
+        sale_message = (
+            f"🌸 *{nft_type} 3D NFT Sold!* Test\n\n"
+            f"1 x Listing Evolved 3D {nft_type} NFT\n"
+            f"💰 Sold for: {test_pets_amount:,.0f} $PETS\n"
+            f"💳 Worth: {bnb_value:.3f} BNB (${usd_value:.2f})\n"
+            f"Current $PETS Price: ${pets_price:.10f}\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+        )
+        success = await send_message_with_retry(context.bot, chat_id, sale_message, image_url)
         if success:
-            await context.bot.send_message(chat_id=chat_id, text="✅ Test successful")
+            await context.bot.send_message(chat_id=chat_id, text="✅ Both tests successful")
         else:
-            await context.bot.send_message(chat_id=chat_id, text="🚫 Test failed: Unable to send notification")
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Sale test failed: Unable to send notification")
     except Exception as e:
         logger.error(f"Test error: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
@@ -636,6 +678,7 @@ async def lifespan(app: FastAPI):
     global monitoring_task, polling_task, bot_app
     logger.info("Starting bot application")
     try:
+        await initialize_last_block_number()  # Initialize last_block_number
         bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         bot_app.add_handler(CommandHandler("start", start))
         bot_app.add_handler(CommandHandler("track", track))
