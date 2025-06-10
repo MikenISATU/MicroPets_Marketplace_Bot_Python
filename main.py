@@ -290,6 +290,303 @@ async def process_transaction(context, transaction: Dict, pets_price: float, cha
         if transaction['transactionHash'] in posted_transactions:
             logger.info(f"Skipping already posted transaction: {transaction['transactionHash']}")
             return False
+        bnb_value = get_transaction_details(transaction['ross1
+
+System: The code you provided was cut off at the `process_transaction` function. Based on the context and the error logs, the primary issue is the `NameError: name 'bot_app' is not defined`, which occurs because the command handlers are added before `bot_app` is initialized in the `lifespan` function. To fix this, I’ve moved the command handler registration into the `lifespan` function. Below is the complete, revised code for `main.py`, ensuring `bot_app` is defined when handlers are added. I’ve also included minor improvements for robustness, such as better error handling and cleanup, while preserving the original functionality.
+
+<xaiArtifact artifact_id="f5443f04-1785-451f-aef2-8a49956f03b4" artifact_version_id="ee59efae-bb3a-4459-8b28-f8cde7006b97" title="main.py" contentType="text/python">
+import os
+import logging
+import requests
+import random
+import asyncio
+import json
+import time
+import uuid
+from contextlib import asynccontextmanager
+from typing import Optional, Dict, List, Set
+from fastapi import FastAPI, Request, HTTPException
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler
+from web3 import Web3
+from tenacity import retry, stop_after_attempt, wait_exponential
+from dotenv import load_dotenv
+from datetime import datetime
+from decimal import Decimal
+import telegram
+import aiohttp
+import threading
+from bs4 import BeautifulSoup
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+httpx_logger = logging.getLogger("httpx")
+httpx_logger.setLevel(logging.WARNING)
+telegram_logger = logging.getLogger("telegram")
+telegram_logger.setLevel(logging.WARNING)
+
+# Check python-telegram-bot version
+logger.info(f"python-telegram-bot version: {telegram.__version__}")
+if not telegram.__version__.startswith('20'):
+    logger.error(f"Expected python-telegram-bot v20.0+, got {telegram.__version__}")
+    raise SystemExit(1)
+
+# Load environment variables
+load_dotenv()
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
+BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
+BNB_RPC_URL = os.getenv('BNB_RPC_URL')
+CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3')  # Marketplace contract
+ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+PORT = int(os.getenv('PORT', 8080))
+COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
+TARGET_ADDRESS = os.getenv('TARGET_ADDRESS', '0x4BdEcE4E422fA015336234e4fC4D39ae6dD75b01')  # NFT contract or pair
+POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
+
+# Validate environment variables
+missing_vars = []
+for var, name in [
+    (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
+    (APP_URL, 'APP_URL/RAILWAY_PUBLIC_DOMAIN'),
+    (BSCSCAN_API_KEY, 'BSCSCAN_API_KEY'),
+    (BNB_RPC_URL, 'BNB_RPC_URL'),
+    (CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'),
+    (ADMIN_CHAT_ID, 'ADMIN_USER_ID'),
+    (TELEGRAM_CHAT_ID, 'TELEGRAM_CHAT_ID'),
+    (TARGET_ADDRESS, 'TARGET_ADDRESS')
+]:
+    if not var:
+        missing_vars.append(name)
+if missing_vars:
+    logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+    raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+# Validate Ethereum addresses
+for addr, name in [(CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'), (TARGET_ADDRESS, 'TARGET_ADDRESS')]:
+    if not Web3.is_address(addr):
+        logger.error(f"Invalid Ethereum address for {name}: {addr}")
+        raise ValueError(f"Invalid Ethereum address for {name}: {addr}")
+
+if not COINMARKETCAP_API_KEY:
+    logger.warning("COINMARKETCAP_API_KEY is empty; CoinMarketCap API calls will be skipped")
+
+logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
+
+# Constants
+BASE_URL = "https://element.market/collections/micropetsnewerabnb-5414f1c9?search[toggles][0]=ALL"
+
+# In-memory data
+transaction_cache: List[Dict] = []
+active_chats: Set[str] = {TELEGRAM_CHAT_ID}
+last_transaction_hash: Optional[str] = None
+last_block_number: Optional[int] = None
+is_tracking_enabled: bool = False
+recent_errors: List[Dict] = []
+last_transaction_fetch: Optional[float] = None
+TRANSACTION_CACHE_THRESHOLD = 2 * 60 * 1000
+posted_transactions: Set[str] = set()
+transaction_details_cache: Dict[str, float] = {}
+monitoring_task = None
+polling_task = None
+file_lock = threading.Lock()
+
+# Initialize Web3
+try:
+    w3 = Web3(Web3.HTTPProvider(BNB_RPC_URL, request_kwargs={'timeout': 60}))
+    if not w3.is_connected():
+        raise Exception("Primary RPC URL connection failed")
+    logger.info("Successfully initialized Web3 with BNB_RPC_URL")
+except Exception as e:
+    logger.error(f"Failed to initialize Web3 with primary URL: {e}")
+    w3 = Web3(Web3.HTTPProvider('https://bsc-dataseed2.binance.org', request_kwargs={'timeout': 60}))
+    if not w3.is_connected():
+        logger.error("Fallback RPC URL connection failed")
+        raise ValueError("Both primary and fallback Web3 connections failed")
+    logger.info("Web3 initialized with fallback")
+
+# Helper functions
+def get_gif_url(category: str) -> str:
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(BASE_URL, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        gif_elements = soup.find_all('img', src=lambda x: x and x.endswith('.gif'))
+        if gif_elements:
+            return random.choice(gif_elements)['src']
+        logger.warning("No GIFs found on the page, using fallback")
+        return "https://via.placeholder.com/150.gif?text=NFT+GIF"
+    except Exception as e:
+        logger.error(f"Failed to scrape GIF URL: {e}")
+        return "https://via.placeholder.com/150.gif?text=NFT+GIF"
+
+def shorten_address(address: str) -> str:
+    return f"{address[:6]}...{address[-4:]}" if address and Web3.is_address(address) else ''
+
+def load_posted_transactions() -> Set[str]:
+    try:
+        with file_lock:
+            if not os.path.exists('posted_transactions.txt'):
+                return set()
+            with open('posted_transactions.txt', 'r') as f:
+                return set(line.strip() for line in f if line.strip())
+    except Exception as e:
+        logger.warning(f"Could not load posted_transactions.txt: {e}")
+        return set()
+
+def log_posted_transaction(transaction_hash: str) -> None:
+    try:
+        with file_lock:
+            with open('posted_transactions.txt', 'a') as f:
+                f.write(transaction_hash + '\n')
+    except Exception as e:
+        logger.warning(f"Could not write to posted_transactions.txt: {e}")
+
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+def get_pets_price() -> float:
+    try:
+        headers = {'Accept': 'application/json;version=20230302'}
+        response = requests.get(
+            f"https://api.geckoterminal.com/api/v2/simple/networks/bsc/token_price/{CONTRACT_ADDRESS}",
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(CONTRACT_ADDRESS.lower(), '0')
+        if not isinstance(price_str, (str, float, int)) or not price_str:
+            raise ValueError("Invalid price data from GeckoTerminal")
+        price = float(price_str)
+        if price <= 0:
+            raise ValueError("Geckoterminal returned non-positive price")
+        logger.info(f"$PETS price from GeckoTerminal: ${price:.10f}")
+        time.sleep(0.5)
+        return price
+    except Exception as e:
+        logger.error(f"GeckoTerminal $PETS price fetch failed: {e}, status={getattr(e.response, 'status_code', 'N/A')}")
+        return 0.00003886  # Fallback price if Geckoterminal fails
+
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+def get_transaction_details(transaction_hash: str) -> Optional[float]:
+    if transaction_hash in transaction_details_cache:
+        logger.info(f"Using cached BNB value for transaction {transaction_hash}")
+        return transaction_details_cache[transaction_hash]
+    try:
+        response = requests.get(
+            f"https://api.bscscan.com/api?module=proxy&action=eth_getTransactionByHash&txhash={transaction_hash}&apikey={BSCSCAN_API_KEY}",
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or 'result' not in data:
+            logger.error(f"Invalid response for transaction {transaction_hash}: {data}")
+            return None
+        result = data['result']
+        if not isinstance(result, dict):
+            logger.error(f"Transaction {transaction_hash} result is not a dict: {result}")
+            return None
+        value_wei_str = result.get('value', '0')
+        if not isinstance(value_wei_str, str) or not value_wei_str.startswith('0x'):
+            logger.error(f"Invalid value data for transaction {transaction_hash}: {value_wei_str}")
+            return None
+        value_wei = int(value_wei_str, 16)
+        bnb_value = float(w3.from_wei(value_wei, 'ether'))
+        logger.info(f"Transaction {transaction_hash}: BNB value={bnb_value:.6f}")
+        transaction_details_cache[transaction_hash] = bnb_value
+        time.sleep(0.5)
+        return bnb_value
+    except Exception as e:
+        logger.error(f"Failed to fetch transaction details for {transaction_hash}: {e}")
+        return None
+
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock: Optional[int] = None) -> List[Dict]:
+    global transaction_cache, last_transaction_fetch, last_block_number
+    try:
+        if not startblock and last_block_number:
+            startblock = last_block_number + 1
+        params = {
+            'module': 'account',
+            'action': 'txlist',
+            'address': Web3.to_checksum_address(CONTRACT_ADDRESS),
+            'startblock': startblock or 0,
+            'endblock': endblock or 99999999,
+            'page': 1,
+            'offset': 100,
+            'sort': 'desc',
+            'apikey': BSCSCAN_API_KEY
+        }
+        response = requests.get("https://api.bscscan.com/api", params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or data.get('status') != '1':
+            raise ValueError(f"Invalid BscScan response: {data.get('message', 'No message')}")
+        transactions = [
+            {
+                'transactionHash': tx['hash'],
+                'to': tx['to'],
+                'from': tx['from'],
+                'value': tx['value'],
+                'blockNumber': int(tx['blockNumber']),
+                'timeStamp': int(tx['timeStamp']),
+                'isError': tx['isError'],
+                'input': tx.get('input', '')
+            }
+            for tx in data['result']
+            if tx['input'] and ('list' in tx['input'].lower() or 'buy' in tx['input'].lower())
+        ]
+        if transactions and not startblock:
+            last_block_number = max(tx['blockNumber'] for tx in transactions)
+        if not startblock:
+            transaction_cache = [tx for tx in transactions if last_block_number is None or tx['blockNumber'] >= last_block_number]
+            transaction_cache = transaction_cache[-1000:]
+            last_transaction_fetch = datetime.now().timestamp() * 1000
+        logger.info(f"Fetched {len(transactions)} marketplace transactions, last_block_number={last_block_number}")
+        time.sleep(0.5)
+        return transactions
+    except Exception as e:
+        logger.error(f"Failed to fetch BscScan transactions: {e}")
+        await asyncio.sleep(5)  # Retry delay for RPC issues
+        return transaction_cache or []
+
+async def send_gif_with_retry(context, chat_id: str, gif_url: str, options: Dict, max_retries: int = 3, delay: int = 2) -> bool:
+    for i in range(max_retries):
+        try:
+            logger.info(f"Attempt {i+1}/{max_retries} to send GIF to chat {chat_id}: {gif_url}")
+            async with aiohttp.ClientSession() as session:
+                async with session.head(gif_url, timeout=5) as head_response:
+                    if head_response.status != 200:
+                        logger.error(f"GIF URL inaccessible, status {head_response.status}: {gif_url}")
+                        raise Exception(f"GIF URL inaccessible, status {head_response.status}")
+            await context.bot.send_animation(chat_id=chat_id, animation=gif_url, **options)
+            logger.info(f"Successfully sent GIF to chat {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send GIF (attempt {i+1}/{max_retries}): {e}")
+            if i == max_retries - 1:
+                await context.bot.send_message(
+                    chat_id,
+                    f"{options['caption']}\n\n⚠️ GIF unavailable",
+                    parse_mode='Markdown'
+                )
+                return False
+            await asyncio.sleep(delay)
+    return False
+
+async def process_transaction(context, transaction: Dict, pets_price: float, chat_id: str = TELEGRAM_CHAT_ID) -> bool:
+    global posted_transactions
+    try:
+        if transaction['transactionHash'] in posted_transactions:
+            logger.info(f"Skipping already posted transaction: {transaction['transactionHash']}")
+            return False
         bnb_value = get_transaction_details(transaction['transactionHash'])
         if bnb_value is None or bnb_value <= 0:
             logger.info(f"Skipping transaction {transaction['transactionHash']} with invalid BNB value: {bnb_value}")
@@ -564,7 +861,7 @@ async def help_command(update: Update, context) -> None:
 async def status(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat determinations_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(
         chat_id=chat_id,
@@ -724,6 +1021,18 @@ async def lifespan(app: FastAPI):
     logger.info("Starting bot application")
     try:
         bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # Register command handlers
+        bot_app.add_handler(CommandHandler("start", start))
+        bot_app.add_handler(CommandHandler("track", track))
+        bot_app.add_handler(CommandHandler("stop", stop))
+        bot_app.add_handler(CommandHandler("stats", stats))
+        bot_app.add_handler(CommandHandler("help", help_command))
+        bot_app.add_handler(CommandHandler("status", status))
+        bot_app.add_handler(CommandHandler("debug", debug))
+        bot_app.add_handler(CommandHandler("test", test))
+        bot_app.add_handler(CommandHandler("noV", no_video))
+
         await bot_app.initialize()
         try:
             await set_webhook_with_retry(bot_app)
@@ -768,17 +1077,6 @@ async def lifespan(app: FastAPI):
             logger.error(f"Shutdown error: {str(e)}")
 
 app = FastAPI(lifespan=lifespan)
-
-# Bot initialization
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("track", track))
-bot_app.add_handler(CommandHandler("stop", stop))
-bot_app.add_handler(CommandHandler("stats", stats))
-bot_app.add_handler(CommandHandler("help", help_command))
-bot_app.add_handler(CommandHandler("status", status))
-bot_app.add_handler(CommandHandler("debug", debug))
-bot_app.add_handler(CommandHandler("test", test))
-bot_app.add_handler(CommandHandler("noV", no_video))
 
 if __name__ == "__main__":
     import uvicorn
