@@ -15,7 +15,6 @@ from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from datetime import datetime
-import telegram
 import aiohttp
 import threading
 from bs4 import BeautifulSoup
@@ -30,12 +29,6 @@ httpx_logger = logging.getLogger("httpx")
 httpx_logger.setLevel(logging.WARNING)
 telegram_logger = logging.getLogger("telegram")
 telegram_logger.setLevel(logging.WARNING)
-
-# Check python-telegram-bot version
-logger.info(f"python-telegram-bot version: {telegram.__version__}")
-if not telegram.__version__.startswith('20'):
-    logger.error(f"Expected python-telegram-bot v20.0+, got {telegram.__version__}")
-    raise SystemExit(1)
 
 # Load environment variables
 load_dotenv()
@@ -97,9 +90,8 @@ BUY_PETS_LINK = "https://pancakeswap.finance/swap?outputCurrency=0x2466858ab5edA
 # In-memory data
 posted_events: Set[str] = set()
 last_block_number: Optional[int] = None
-is_monitoring_enabled: bool = False  # Default to disabled
+is_monitoring_enabled: bool = False
 monitoring_task: Optional[asyncio.Task] = None
-polling_task: Optional[asyncio.Task] = None
 recent_errors: List[Dict] = []
 file_lock = threading.Lock()
 bot_app = None
@@ -179,8 +171,6 @@ def get_pets_price(timestamp: int) -> float:
         response.raise_for_status()
         data = response.json()
         price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(CONTRACT_ADDRESS.lower(), '0')
-        if not isinstance(price_str, (str, float, int)) or not price_str:
-            raise ValueError("Invalid price data from GeckoTerminal")
         price = float(price_str)
         if price <= 0:
             raise ValueError("Geckoterminal returned non-positive price")
@@ -202,15 +192,13 @@ def get_bnb_price(timestamp: int) -> float:
         response.raise_for_status()
         data = response.json()
         price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get('0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c', '0')
-        if not price_str or not isinstance(price_str, (str, float, int)):
-            raise ValueError("Invalid price data from Geckoterminal")
         price = float(price_str)
         if price <= 0:
             raise ValueError("Geckoterminal returned non-positive price")
         logger.info(f"BNB price from Geckoterminal: ${price:.2f} at {datetime.fromtimestamp(timestamp)}")
         return price
     except Exception as e:
-        logger.error(f"Geckoterminal BNB price fetch failed: {e}")
+        logger.error(f"GeckoTerminal BNB price fetch failed: {e}")
         return 600.0
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
@@ -253,22 +241,25 @@ async def fetch_logs(startblock: Optional[int] = None, endblock: Optional[int] =
             recent_errors.pop(0)
         return []
 
-async def send_message_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: str, message: str, image_url: str, parse_mode: str = 'Markdown', max_retries: int = 3, delay: int = 2) -> bool:
+async def send_message_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: str, message: str, image_url: str = None, parse_mode: str = 'Markdown', max_retries: int = 3, delay: int = 2) -> bool:
     for i in range(max_retries):
         try:
             logger.info(f"Attempt {i+1}/{max_retries} to send message to chat {chat_id}")
-            async with aiohttp.ClientSession() as session:
-                async with session.head(image_url, timeout=5) as head_response:
-                    if head_response.status != 200:
-                        logger.error(f"Image URL inaccessible, status {head_response.status}: {image_url}")
-                        raise Exception(f"Image URL inaccessible, status {head_response.status}")
-            await context.bot.send_photo(chat_id=chat_id, photo=image_url, caption=message, parse_mode=parse_mode)
+            if image_url:
+                async with aiohttp.ClientSession() as session:
+                    async with session.head(image_url, timeout=5) as head_response:
+                        if head_response.status != 200:
+                            logger.error(f"Image URL inaccessible, status {head_response.status}: {image_url}")
+                            raise Exception(f"Image URL inaccessible, status {head_response.status}")
+                await context.bot.send_photo(chat_id=chat_id, photo=image_url, caption=message, parse_mode=parse_mode)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=message, parse_mode=parse_mode)
             logger.info(f"Successfully sent message to chat {chat_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to send message (attempt {i+1}/{max_retries}): {e}")
             if i == max_retries - 1:
-                await context.bot.send_message(chat_id=chat_id, text=f"{message}\n\n⚠️ Image unavailable", parse_mode='Markdown')
+                await context.bot.send_message(chat_id=chat_id, text=f"{message}\n\n⚠️ {'Image unavailable' if image_url else 'Message sending failed'}")
                 return False
             await asyncio.sleep(delay)
     return False
@@ -355,14 +346,11 @@ async def set_webhook_with_retry(bot_app: ContextTypes.DEFAULT_TYPE) -> bool:
     webhook_url = f"https://{APP_URL}/webhook"
     logger.info(f"Attempting to set webhook: {webhook_url}")
     try:
-        if 'railway.app' in APP_URL:
-            logger.info("Skipping health check for Railway environment")
-        else:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
-                    if response.status != 200:
-                        logger.error(f"Health check failed: {response.status}, response: {await response.text()}")
-                        raise Exception(f"Health check failed: {response.status}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
+                if response.status != 200:
+                    logger.error(f"Health check failed: {response.status}, response: {await response.text()}")
+                    raise Exception(f"Health check failed: {response.status}")
         await bot_app.bot.delete_webhook(drop_pending_updates=True)
         await bot_app.bot.set_webhook(webhook_url, allowed_updates=["message", "channel_post"])
         webhook_info = await bot_app.bot.get_webhook_info()
@@ -376,7 +364,6 @@ async def set_webhook_with_retry(bot_app: ContextTypes.DEFAULT_TYPE) -> bool:
         return False
 
 async def polling_fallback(bot_app: ContextTypes.DEFAULT_TYPE) -> None:
-    global polling_task
     logger.info("Starting polling fallback")
     try:
         if not bot_app.running:
@@ -389,17 +376,13 @@ async def polling_fallback(bot_app: ContextTypes.DEFAULT_TYPE) -> None:
                 error_callback=lambda e: logger.error(f"Polling error: {e}")
             )
             logger.info("Polling started successfully")
-            while polling_task and not polling_task.done():
-                await asyncio.sleep(60)
         else:
             logger.warning("Bot already running")
-            while polling_task and not polling_task.done():
-                await asyncio.sleep(60)
     except Exception as e:
         logger.error(f"Polling error: {e}")
         await asyncio.sleep(10)
     finally:
-        if bot_app.running and polling_task and polling_task.cancelled():
+        if bot_app.running:
             try:
                 await bot_app.updater.stop()
                 await bot_app.stop()
@@ -409,19 +392,19 @@ async def polling_fallback(bot_app: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.error(f"Error stopping polling: {e}")
 
 def is_admin(update: Update) -> bool:
-    return str(update.effective_chat.id) == ADMIN_USER_ID
+    return str(update.effective_user.id) == ADMIN_USER_ID
 
 # Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /start command from chat {chat_id}")
+    logger.info(f"Received /start command from user {update.effective_user.id} in chat {chat_id}")
     active_chats.add(str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to MicroPets Marketplace Tracker! Use /track to start NFT alerts.")
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global is_monitoring_enabled, monitoring_task
     chat_id = update.effective_chat.id
-    logger.info(f"Received /track command from chat {chat_id}")
+    logger.info(f"Received /track command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -437,7 +420,7 @@ async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global is_monitoring_enabled, monitoring_task
     chat_id = update.effective_chat.id
-    logger.info(f"Received /stop command from chat {chat_id}")
+    logger.info(f"Received /stop command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -454,7 +437,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /stats command from chat {chat_id}")
+    logger.info(f"Received /stats command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -489,10 +472,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /help command from chat {chat_id}")
-    if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return
+    logger.info(f"Received /help command from user {update.effective_user.id} in chat {chat_id}")
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
@@ -512,10 +492,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /status command from chat {chat_id}")
-    if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return
+    logger.info(f"Received /status command from user {update.effective_user.id} in chat {chat_id}")
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"🔍 *Status:* {'Enabled' if is_monitoring_enabled else 'Disabled'}",
@@ -524,10 +501,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /debug command from chat {chat_id}")
-    if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return
+    logger.info(f"Received /debug command from user {update.effective_user.id} in chat {chat_id}")
     status = {
         'monitoringEnabled': is_monitoring_enabled,
         'lastBlockNumber': last_block_number,
@@ -536,7 +510,7 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             'bscWeb3': bool(w3.is_connected()),
         },
         'activeChats': list(active_chats),
-        'pollingActive': polling_task is not None and not polling_task.done()
+        'botRunning': bot_app.running if bot_app else False
     }
     await context.bot.send_message(
         chat_id=chat_id,
@@ -546,7 +520,7 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /test command from chat {chat_id}")
+    logger.info(f"Received /test command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -595,7 +569,7 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    logger.info(f"Received /noV command from chat {chat_id}")
+    logger.info(f"Received /noV command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
@@ -615,8 +589,8 @@ async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"[🔍 View](https://bscscan.com/tx/{test_tx_hash})\n\n"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
-        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-        await context.bot.send_message(chat_id=chat_id, text="✅ No-video test successful")
+        await send_message_with_retry(context, chat_id, message)
+        await context.bot.send_message(chat_id=chat_id, text="✅ No-image test successful")
     except Exception as e:
         logger.error(f"/noV error: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
@@ -639,16 +613,6 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
-
-@app.get("/webhook")
-async def webhook_get():
-    logger.info("Received GET webhook request")
-    raise HTTPException(status_code=405, detail="Method Not Allowed")
-
-@app.get("/favicon.ico")
-async def favicon():
-    logger.info("Ignoring favicon.ico request")
-    raise HTTPException(status_code=404, detail="Favicon not available")
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -677,43 +641,46 @@ async def webhook(request: Request):
 # Lifespan handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global monitoring_task, polling_task, bot_app
+    global bot_app
     logger.info("Starting bot application")
     try:
         await initialize_last_block_number()
+        posted_events.update(load_posted_transactions())
         bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        bot_app.add_handler(CommandHandler("start", start))
-        bot_app.add_handler(CommandHandler("track", track))
-        bot_app.add_handler(CommandHandler("stop", stop))
-        bot_app.add_handler(CommandHandler("stats", stats))
-        bot_app.add_handler(CommandHandler("help", help_command))
-        bot_app.add_handler(CommandHandler("status", status))
-        bot_app.add_handler(CommandHandler("debug", debug))
-        bot_app.add_handler(CommandHandler("test", test))
-        bot_app.add_handler(CommandHandler("noV", no_video))
-        commands = [
-            BotCommand(command="start", description="Start the bot"),
-            BotCommand(command="track", description="Start tracking events"),
-            BotCommand(command="stop", description="Stop tracking events"),
-            BotCommand(command="stats", description="Show marketplace stats"),
-            BotCommand(command="help", description="Show commands"),
-            BotCommand(command="status", description="Check bot status"),
-            BotCommand(command="debug", description="Show debug info"),
-            BotCommand(command="test", description="Test event notification"),
-            BotCommand(command="noV", description="Test event without image")
+        # Register command handlers
+        handlers = [
+            CommandHandler("start", start),
+            CommandHandler("track", track),
+            CommandHandler("stop", stop),
+            CommandHandler("stats", stats),
+            CommandHandler("help", help_command),
+            CommandHandler("status", status),
+            CommandHandler("debug", debug),
+            CommandHandler("test", test),
+            CommandHandler("nov", no_video)
         ]
-        logger.info(f"Setting bot commands: {[cmd.to_dict() for cmd in commands]}")
+        for handler in handlers:
+            bot_app.add_handler(handler)
+            logger.info(f"Registered handler for command /{handler.command[0]}")
+        # Set bot commands
+        commands = [
+            BotCommand("start", "Start the bot"),
+            BotCommand("track", "Start tracking events"),
+            BotCommand("stop", "Stop tracking events"),
+            BotCommand("stats", "Show marketplace stats"),
+            BotCommand("help", "Show commands"),
+            BotCommand("status", "Check bot status"),
+            BotCommand("debug", "Show debug info"),
+            BotCommand("test", "Test event notification"),
+            BotCommand("nov", "Test event without image")
+        ]
         await bot_app.initialize()
-        try:
-            await bot_app.bot.set_my_commands(commands)
-            logger.info("Bot commands set successfully")
-        except Exception as e:
-            logger.error(f"Failed to set bot commands: {e}")
-        if await set_webhook_with_retry(bot_app):
-            logger.info("Webhook mode active")
-        else:
+        await bot_app.bot.set_my_commands(commands)
+        logger.info("Bot commands set successfully")
+        # Try webhook first, fallback to polling
+        if not await set_webhook_with_retry(bot_app):
             logger.info("Webhook setup failed, starting polling")
-            polling_task = asyncio.create_task(polling_fallback(bot_app))
+            await polling_fallback(bot_app)
         yield
     except Exception as e:
         logger.error(f"Startup error: {e}")
@@ -728,23 +695,11 @@ async def lifespan(app: FastAPI):
                     await monitoring_task
                 except asyncio.CancelledError:
                     logger.info("Monitoring task cancelled")
-                monitoring_task = None
-            if polling_task:
-                polling_task.cancel()
-                try:
-                    await polling_task
-                except asyncio.CancelledError:
-                    logger.info("Polling task cancelled")
-                polling_task = None
             if bot_app and bot_app.running:
                 await bot_app.stop()
                 await bot_app.shutdown()
-                try:
-                    await bot_app.bot.delete_webhook(drop_pending_updates=True)
-                    logger.info("Webhook deleted")
-                except Exception as e:
-                    logger.error(f"Failed to delete webhook: {e}")
-            logger.info("Bot shutdown completed")
+                await bot_app.bot.delete_webhook(drop_pending_updates=True)
+                logger.info("Webhook deleted")
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
