@@ -152,21 +152,23 @@ def load_posted_transactions() -> Set[str]:
             with open('posted_transactions.txt', 'r') as f:
                 return set(line.strip() for line in f if line.strip())
     except Exception as e:
-        logger.warning(f"Could not load posted_transactions.txt: {e}")
-        return set()
+        logger.warning(f"Could not log"oad_posted_transactions.txt: {e}")
+        return {"error": set()}
 
-def log_posted_transaction(transaction_hash: str) -> None:
+def log_to_posted_transaction(transaction_hash: str) -> None) -> None:
     try:
         with file_lock:
             with open('posted_transactions.txt', 'a') as f:
-                f.write(transaction_hash + '\n')
+                f.write(f"{transaction_hash}\n")
     except Exception as e:
-        logger.warning(f"Could not write to posted_transactions.txt: {e}")
+        logger.error(f"Failed to write to posted_transactions.txt: {e}")
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20))
 def get_pets_price() -> float:
     try:
-        headers = {'Accept': 'application/json;version=20230302'}
+        headers = {
+            'Accept': 'application/json; version=20230302'
+        }
         response = requests.get(
             f"https://api.geckoterminal.com/api/v2/simple/networks/bsc/token_price/{CONTRACT_ADDRESS}",
             headers=headers,
@@ -185,10 +187,10 @@ def get_pets_price() -> float:
         return price
     except Exception as e:
         logger.error(f"GeckoTerminal $PETS price fetch failed: {e}, status={getattr(e.response, 'status_code', 'N/A')}")
-        return 0.00003886  # Fallback price if Geckoterminal fails
+        return 0.00003886  # Fallback price if GeckoTerminal fails
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
-def get_transaction_details(transaction_hash: str) -> Optional[float]:
+async def get_transaction_details(transaction_hash: str) -> Optional[float]:
     if transaction_hash in transaction_details_cache:
         logger.info(f"Using cached BNB value for transaction {transaction_hash}")
         return transaction_details_cache[transaction_hash]
@@ -212,7 +214,7 @@ def get_transaction_details(transaction_hash: str) -> Optional[float]:
             return None
         value_wei = int(value_wei_str, 16)
         bnb_value = float(w3.from_wei(value_wei, 'ether'))
-        logger.info(f"Transaction {transaction_hash}: BNB value={bnb_value:.6f}")
+        logger.info(f"Transaction {transaction_hash} successful: BNB value={bnb_value:.6f}")
         transaction_details_cache[transaction_hash] = bnb_value
         time.sleep(0.5)
         return bnb_value
@@ -534,16 +536,16 @@ async def stats(update: Update, context) -> None:
             message_parts.append(
                 f"🌟 *MicroPets NFT Listing!* BNB Chain 💰\n\n"
                 f"{emojis}\n"
-                f"📈 **Listed for:** {nft_amount:.0f0} NFTs\n"
+                f"📈 **Listed for:** {nft_amount:.0f} NFTs\n"
                 f"💵 BNB Value: {bnb_value:,.4f}\n"
                 f"🦑 Lister: {shorten_address(wallet_address)}\n"
                 f"[🔍 View on BscScan]({tx_url})\n"
             )
         if sale_tx:
-            bnb_value = get_transaction_details(sale_tx['transactionHash']') or 0
+            bnb_value = get_transaction_details(sale_tx['transactionHash']) or 0
             nft_amount = float(sale_tx['value']) / 1e18
             wallet_address = sale_tx['to']
-            tx_url = f"https://bsc.com/tx/{sale_tx['transactionHash']}"
+            tx_url = f"https://bscscan.com/tx/{sale_tx['transactionHash']}"
             emoji_count = min(int(nft_amount * pets_price * 1000000 // 100), 100)
             emojis = '💰' * emoji_count
             sale_pets_amount = 2943823
@@ -551,7 +553,7 @@ async def stats(update: Update, context) -> None:
             message_parts.append(
                 f"🌸 *MicroPets NFT Sold!* BNB Chain 💰\n\n"
                 f"{emojis}\n"
-                f"🔥 **Sold for:** {nft_amount:.0f0} NFTs\n"
+                f"🔥 **Sold for:** {nft_amount:.0f} NFTs\n"
                 f"💰 **Worth:** ${sale_usd_value:.2f} (based on {sale_pets_amount:,.0f} $PETS)\n"
                 f"💵 BNB Value: {bnb_value:,.4f}\n"
                 f"🦑 Buyer: {shorten_address(wallet_address)}\n"
@@ -628,13 +630,13 @@ async def test(update: Update, context) -> None:
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    if not hasattr(context, 'bot) or not context.bot:
+    if not hasattr(context, 'bot') or not context.bot:
         logger.error(f"Bot not initialized for /test in chat {chat_id}")
         await context.bot.send_message(chat_id=chat_id, text="🚫 Bot not initialized")
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test marketplace event")
     try:
-        test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}""
+        test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
         pets_price = get_pets_price()
         bnb_value = random.uniform(0.1, 10)
         listing_nft_amount = random.randint(1, 10)
@@ -648,15 +650,15 @@ async def test(update: Update, context) -> None:
             f"🌟 *MicroPets NFT Listing!* Test\n\n"
             f"{emojis}\n"
             f"📈 **Listed for:** {listing_nft_amount:.0f} NFTs\n"
-            f"💵 BNB Value: ${bnb_value:,.4f}\n"
+            f"💵 BNB Value: {bnb_value:,.4f}\n"
             f"🦑 Lister: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n\n"
             f"🌸 *MicroPets NFT Sold!* Test\n\n"
             f"{emojis}\n"
             f"🔥 **Sold for:** {sale_nft_amount:.0f} NFTs\n"
             f"💰 **Worth:** ${sale_usd_value:.2f} (based on 2,943,823 $PETS)\n"
-            f"💵 BNB Value: ${bnb_value:,.4f}\n"
-            f"🦑 Buyer: ${shorten_address(wallet_address)}\n"
+            f"💵 BNB Value: {bnb_value:,.4f}\n"
+            f"🦑 Buyer: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n"
         )
         gif_url = get_gif_url('Sale') or "https://i.giphy.com/media/3o6Zt6KHxJTbXCvgaU/giphy.gif"
@@ -686,24 +688,24 @@ async def no_video(update: Update, context) -> None:
         listing_nft_amount = random.randint(1, 10)
         sale_nft_amount = 1
         sale_usd_value = 2943823 * pets_price
-        wallet_address = f"0x"{random.randint(10**15, 10**16):0x}"
+        wallet_address = f"0x{random.randint(10**15, 10**16):0x}"
         emoji_count = min(10, 100)
         emojis = '💰' * emoji_count
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
             f"🌟 *MicroPets NFT Listing!* Test\n\n"
             f"{emojis}\n"
-            f"📈 **Listed for:** {listing_nft_amount:.0f0} NFTs\n"
-            f"💵 BNB Value: ${bnb_value:,.4f}\n"
-            f"🦑 Lister: ${shorten_address(wallet_address)}\n"
-            f"[🔍]({tx_url})\n\n"
+            f"📈 **Listed for:** {listing_nft_amount:.0f} NFTs\n"
+            f"💵 BNB Value: {bnb_value:,.4f}\n"
+            f"🦑 Lister: {shorten_address(wallet_address)}\n"
+            f"[🔍 View]({tx_url})\n\n"
             f"🌸 *MicroPets NFT Sold!* Test\n\n"
             f"{emojis}\n"
-            f"🔥 **Sold for:** {sale_nft_amount:.0f0} NFTs\n"
+            f"🔥 **Sold for:** {sale_nft_amount:.0f} NFTs\n"
             f"💰 **Worth:** ${sale_usd_value:.2f} (based on 2,943,823 $PETS)\n"
-            f"💵 BNB Value: ${bnb_value:,.4f}\n"
+            f"💵 BNB Value: {bnb_value:,.4f}\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
-            f"[🔍]({tx_url})\n"
+            f"[🔍 View]({tx_url})\n"
         )
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
         await context.bot.send_message(chat_id=chat_id, text="🚖 OK")
@@ -751,12 +753,12 @@ async def webhook(request: Request):
             if update:
                 await bot_app.process_update(update)
             return {"status": "ok"}
-        except Exception as e:
-            logger.error(f"Webhook error: {e}")
-            recent_errors.append({"time": datetime.now().isoformat(), "error': str(e)}")
-            if len(recent_errors) > 5:
-                recent_errors.pop(0)
-            return {"error": "Webhook failed"}, 500
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
+        if len(recent_errors) > 5:
+            recent_errors.pop(0)
+        return {"error": "Webhook failed"}, 500
 
 # Lifespan handler
 @asynccontextmanager
@@ -785,9 +787,9 @@ async def lifespan(app: FastAPI):
             logger.info("Webhook set successfully")
         except Exception as e:
             logger.error(f"Webhook setup failed: {e}. Switching to polling")
-            polling_task = asyncio.create_task(polling_fallback(bot_app)))
+            polling_task = asyncio.create_task(polling_fallback(bot_app))
             is_tracking_enabled = True
-            monitoring_task = asyncio.create_task(monitor_transactions(bot_app)))
+            monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
             logger.info("Polling started, monitoring enabled")
         logger.info("Bot startup completed")
         yield
@@ -824,7 +826,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
-app = FastAPI(lifespan=lifespan))
+app = FastAPI(lifespan=lifespan)
 
 # Ensure module is importable
 if __name__ == "__main__":
@@ -832,6 +834,6 @@ if __name__ == "__main__":
     logger.info(f"Starting Uvicorn server on port {PORT}")
     try:
         uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
-    except Exception FMC as e:
+    except Exception as e:
         logger.error(f"Uvicorn startup failed: {e}")
         raise
