@@ -242,14 +242,13 @@ async def send_gif_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: str, 
                     if head_response.status != 200:
                         logger.error(f"GIF URL inaccessible, status {head_response.status}: {gif_url}")
                         gif_url = FALLBACK_GIF
-            logger.info(f"Sending message with length: {len(caption)}")
-            await context.bot.send_animation(chat_id=chat_id, animation=gif_url, caption=caption, parse_mode='MarkdownV2')
+            await context.bot.send_animation(chat_id=chat_id, animation=gif_url, caption=caption, parse_mode='Markdown')
             logger.info(f"Successfully sent GIF to chat {chat_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to send GIF (attempt {i+1}/{max_retries}): {e}")
             if i == max_retries - 1:
-                await context.bot.send_message(chat_id, f"{caption}\n\n⚠️ GIF unavailable", parse_mode='MarkdownV2')
+                await context.bot.send_message(chat_id, f"{caption}\n\n⚠️ GIF unavailable", parse_mode='Markdown')
                 return False
             await asyncio.sleep(delay)
     return False
@@ -279,21 +278,21 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
         if is_listing:
             message = (
                 f"🔥 *New 3D NFT New Era Listing* 🔥\n\n"
-                f"**Listed for:** {listing_pets_amount:,.0f} \\$PETS \\(${listing_usd_value:.2f}\\)\n"
+                f"**Listed for:** {listing_pets_amount:,.0f} $PETS (${listing_usd_value:.2f})\n"
                 f"Listed by: {shorten_address(wallet_address)}\n\n"
-                f"Get it on the Marketplace 🎁\\! Join our Alpha Group for 60s early alerts\\! 👀\n\n"
-                f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
+                f"Get it on the Marketplace 🎁! Join our Alpha Group for 60s early alerts! 👀\n\n"
+                f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
         else:
             message = (
                 f"🌸 *3D NFT New Era Sold!* 🌸\n\n"
                 f"{emojis}\n"
-                f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} \\$PETS\n"
-                f"💰 **Worth:** \\${sale_usd_value:.2f}\n"
+                f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
+                f"💰 **Worth:** ${sale_usd_value:.2f}\n"
                 f"💵 BNB Value: {bnb_value:.4f}\n"
                 f"🦑 Buyer: {shorten_address(wallet_address)}\n"
                 f"[🔍 View on BscScan]({tx_url})\n\n"
-                f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
+                f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
         success = await send_gif_with_retry(context, chat_id, gif_url, message)
         if success:
@@ -393,13 +392,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         total_bnb = total_usd / bnb_price if bnb_price > 0 else 0
         gif_url = get_gif_url('Sale' if sales else 'Listing')
         message = (
-            f"📊 *NFT Marketplace Stats \\(Recent Transactions\\)*\n\n"
-            f"🔥 **New Listings:** {len(listings)}\n"
-            f"🌸 **Sales:** {len(sales)}\n"
-            f"💰 **Total \\$PETS:** {len(sales) * PETS_AMOUNT:,.0f} \\(\\$ {total_usd:.2f}/{total_bnb:.3f} BNB\\)\n\n"
-            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
+            f"📊 *NFT Marketplace Stats (Recent Transactions)*\n\n"
+            f"🔥 New Listings: {len(listings)}\n"
+            f"🌸 Sales: {len(sales)}\n"
+            f"💰 Total $PETS: {len(sales) * PETS_AMOUNT:,.0f} (${total_usd:.2f}/{total_bnb:.3f} BNB)\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
-        logger.info(f"Sending stats message with length: {len(message)}")
         await send_gif_with_retry(context, chat_id, gif_url, message)
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
@@ -422,7 +420,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"/debug - Debug info\n"
             f"/help - This message\n"
         ),
-        parse_mode='MarkdownV2'
+        parse_mode='Markdown'
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -431,7 +429,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"🔍 *Status:* {'Enabled' if is_tracking_enabled else 'Disabled'}",
-        parse_mode='MarkdownV2'
+        parse_mode='Markdown'
     )
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -447,7 +445,7 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```",
-        parse_mode='MarkdownV2'
+        parse_mode='Markdown'
     )
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -471,10 +469,10 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         test_tx_hash = f"0xTestListing{uuid.uuid4().hex[:16]}"
         listing_message = (
             f"🔥 *New 3D NFT New Era Listing* Test 🔥\n\n"
-            f"**Listed for:** {listing_pets_amount:,.0f} \\$PETS \\(${listing_usd_value:.2f}\\)\n"
+            f"**Listed for:** {listing_pets_amount:,.0f} $PETS (${listing_usd_value:.2f})\n"
             f"Listed by: {shorten_address(wallet_address)}\n\n"
-            f"Get it on the Marketplace 🎁\\! Join our Alpha Group for 60s early alerts\\! 👀\n\n"
-            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
+            f"Get it on the Marketplace 🎁! Join our Alpha Group for 60s early alerts! 👀\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
         success = await send_gif_with_retry(context, chat_id, gif_url, listing_message)
         if not success:
@@ -488,12 +486,12 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sale_message = (
             f"🌸 *3D NFT New Era Sold!* Test 🌸\n\n"
             f"{emojis}\n"
-            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} \\$PETS\n"
-            f"💰 **Worth:** \\${sale_usd_value:.2f}\n"
+            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
+            f"💰 **Worth:** ${sale_usd_value:.2f}\n"
             f"💵 BNB Value: {bnb_value:.4f}\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
             f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n"
-            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
         success = await send_gif_with_retry(context, chat_id, gif_url, sale_message)
         if success:
@@ -523,15 +521,14 @@ async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = (
             f"🌸 *3D NFT New Era Sold!* Test 🌸\n\n"
             f"{emojis}\n"
-            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} \\$PETS\n"
-            f"💰 **Worth:** \\${usd_value:.2f}\n"
+            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
+            f"💰 **Worth:** ${usd_value:.2f}\n"
             f"💵 BNB Value: {bnb_value:.4f}\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
             f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n"
-            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
-        logger.info(f"Sending /nov message with length: {len(message)}")
-        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
         await context.bot.send_message(chat_id=chat_id, text="✅ Test successful")
     except Exception as e:
         logger.error(f"/nov error: {e}")
