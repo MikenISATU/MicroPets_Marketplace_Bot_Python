@@ -68,6 +68,10 @@ logger.info(f"Environment loaded successfully. PORT={PORT}")
 BASE_URL = "https://element.market/collections/micropetsnewerabnb-5414f1c9?search[toggles][0]=ALL"
 FALLBACK_GIF = "https://media.giphy.com/media/3o7bu3X8f7wY5zX9K0/giphy.gif"
 PETS_AMOUNT = 2943823  # Fixed PETS amount for sales
+MARKETPLACE_LINK = "https://pets.micropets.io/marketplace"
+CHART_LINK = "https://www.dextools.io/app/en/bnb/pair-explorer/0x4bdece4e422fa015336234e4fc4d39ae6dd75b01?t=1749434278227"
+MERCH_LINK = "https://micropets.store/"
+BUY_PETS_LINK = "https://pancakeswap.finance/swap?outputCurrency=0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3"
 
 # In-memory data
 posted_transactions: Set[str] = set()
@@ -271,20 +275,21 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
         emojis = '💰' * emoji_count
         if is_listing:
             message = (
-                f"🌟 *MicroPets NFT Listing!* BNB Chain 💰\n\n"
-                f"{emojis}\n"
-                f"📈 **Listed by:** {shorten_address(wallet_address)}\n"
-                f"[🔍 View on BscScan]({tx_url})\n"
+                f"🔥 *New 3D NFT New Era Listing* 🔥\n\n"
+                f"Listed by: {shorten_address(wallet_address)}\n\n"
+                f"Get it on the Marketplace 🎁 now before it's gone 🚀 Join our Ascension Alpha Group to get this notification 60 seconds earlier! 👀\n\n"
+                f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
         else:
             message = (
-                f"🌸 *MicroPets NFT Sold!* BNB Chain 💰\n\n"
+                f"🌸 *3D NFT New Era Sold!* 🌸\n\n"
                 f"{emojis}\n"
-                f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} PETS\n"
+                f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
                 f"💰 **Worth:** ${usd_value:.2f}\n"
                 f"💵 BNB Value: {bnb_value:.4f}\n"
                 f"🦑 Buyer: {shorten_address(wallet_address)}\n"
-                f"[🔍 View on BscScan]({tx_url})\n"
+                f"[🔍 View on BscScan]({tx_url})\n\n"
+                f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
         success = await send_gif_with_retry(context, chat_id, gif_url, message)
         if success:
@@ -381,13 +386,15 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         sales = [tx for tx in transactions if int(tx['value']) > 0]
         listings = [tx for tx in transactions if int(tx['value']) == 0]
         total_usd = sum(PETS_AMOUNT * pets_price for _ in sales)
-        message = (
-            f"📊 *MicroPets Marketplace Stats*\n\n"
-            f"🔥 Listings: {len(listings)}\n"
-            f"🌸 Sales: {len(sales)}\n"
-            f"💰 Total Worth: ${total_usd:.2f} (based on {PETS_AMOUNT:,.0f} PETS per sale)\n"
-        )
+        total_bnb = total_usd / bnb_price if bnb_price > 0 else 0
         gif_url = get_gif_url('Sale' if sales else 'Listing')
+        message = (
+            f"📊 *NFT Marketplace Stats (Recent Transactions)*\n\n"
+            f"🔥 New Listings: {len(listings)}\n"
+            f"🌸 Sales: {len(sales)}\n"
+            f"💰 Total $PETS: {len(sales) * PETS_AMOUNT:,.0f} (${total_usd:.2f}/{total_bnb:.3f} BNB)\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+        )
         await send_gif_with_retry(context, chat_id, gif_url, message)
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
@@ -399,16 +406,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            "🆘 *Commands:*\n\n"
-            "/start - Start bot\n"
-            "/track - Enable NFT alerts\n"
-            "/stop - Disable alerts\n"
-            "/stats - View marketplace stats\n"
-            "/status - Check tracking status\n"
-            "/test - Test notification\n"
-            "/nov - Test without image\n"
-            "/debug - Debug info\n"
-            "/help - This message\n"
+            f"🆘 *Commands:*\n\n"
+            f"/start - Start bot\n"
+            f"/track - Enable NFT alerts\n"
+            f"/stop - Disable alerts\n"
+            f"/stats - View marketplace stats\n"
+            f"/status - Check tracking status\n"
+            f"/test - Test notification\n"
+            f"/nov - Test without image\n"
+            f"/debug - Debug info\n"
+            f"/help - This message\n"
         ),
         parse_mode='Markdown'
     )
@@ -444,28 +451,47 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test notification")
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test notifications (listing and sale)")
     try:
-        test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
         bnb_value = random.uniform(0.01, 0.1)
         usd_value = PETS_AMOUNT * pets_price
         wallet_address = f"0x{'{:040x}'.format(random.randint(0, 2**160))}"
         gif_url = get_gif_url('Sale')
+
+        # Test Listing
+        test_tx_hash = f"0xTestListing{uuid.uuid4().hex[:16]}"
+        listing_message = (
+            f"🔥 *New 3D NFT New Era Listing* Test 🔥\n\n"
+            f"Listed by: {shorten_address(wallet_address)}\n\n"
+            f"Get it on the Marketplace 🎁 now before it's gone 🚀 Join our Ascension Alpha Group to get this notification 60 seconds earlier! 👀\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+        )
+        success = await send_gif_with_retry(context, chat_id, gif_url, listing_message)
+        if not success:
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Listing test failed: Unable to send notification")
+            return
+
+        # Test Sale
+        test_tx_hash = f"0xTestSale{uuid.uuid4().hex[:16]}"
         emoji_count = min(int(usd_value // 100), 100)
         emojis = '💰' * emoji_count
-        message = (
-            f"🌸 *MicroPets NFT Sold!* Test\n\n"
+        sale_message = (
+            f"🌸 *3D NFT New Era Sold!* Test 🌸\n\n"
             f"{emojis}\n"
-            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} PETS\n"
+            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
             f"💰 **Worth:** ${usd_value:.2f}\n"
             f"💵 BNB Value: {bnb_value:.4f}\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
-            f"[🔍 View](https://bscscan.com/tx/{test_tx_hash})\n"
+            f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
-        await send_gif_with_retry(context, chat_id, gif_url, message)
-        await context.bot.send_message(chat_id=chat_id, text="✅ Test successful")
+        success = await send_gif_with_retry(context, chat_id, gif_url, sale_message)
+        if success:
+            await context.bot.send_message(chat_id=chat_id, text="✅ Both tests successful")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Sale test failed: Unable to send notification")
     except Exception as e:
         logger.error(f"Test error: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
@@ -487,13 +513,14 @@ async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         emoji_count = min(int(usd_value // 100), 100)
         emojis = '💰' * emoji_count
         message = (
-            f"🌸 *MicroPets NFT Sold!* Test\n\n"
+            f"🌸 *3D NFT New Era Sold!* Test 🌸\n\n"
             f"{emojis}\n"
-            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} PETS\n"
+            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
             f"💰 **Worth:** ${usd_value:.2f}\n"
             f"💵 BNB Value: {bnb_value:.4f}\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
-            f"[🔍 View](https://bscscan.com/tx/{test_tx_hash})\n"
+            f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
         await context.bot.send_message(chat_id=chat_id, text="✅ Test successful")
