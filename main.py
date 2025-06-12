@@ -264,20 +264,23 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
         bnb_price = get_bnb_price()
         value_wei = int(transaction['value']) if transaction['value'].isdigit() else 0
         bnb_value = value_wei / 1e18
-        usd_value = PETS_AMOUNT * pets_price
+        listing_pets_amount = random.randint(1000000, 5000000)  # Random $PETS for listings
+        listing_usd_value = listing_pets_amount * pets_price
+        sale_usd_value = PETS_AMOUNT * pets_price
         is_sale = bnb_value > 0  # Assume sale if value > 0
         is_listing = not is_sale  # Assume listing if no value
         wallet_address = transaction['to'] if is_sale else transaction['from']
         tx_url = f"https://bscscan.com/tx/{tx_hash}"
         category = 'Sale' if is_sale else 'Listing'
         gif_url = get_gif_url(category)
-        emoji_count = min(int(usd_value // 100) if is_sale else 10, 100)
+        emoji_count = min(int(sale_usd_value // 100) if is_sale else 10, 100)
         emojis = '💰' * emoji_count
         if is_listing:
             message = (
                 f"🔥 *New 3D NFT New Era Listing* 🔥\n\n"
+                f"**Listed for:** {listing_pets_amount:,.0f} $PETS (${listing_usd_value:.2f})\n"
                 f"Listed by: {shorten_address(wallet_address)}\n\n"
-                f"Get it on the Marketplace 🎁 now before it's gone 🚀 Join our Ascension Alpha Group to get this notification 60 seconds earlier! 👀\n\n"
+                f"Get it on the Marketplace 🎁! Join our Alpha Group for 60s early alerts! 👀\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
         else:
@@ -285,7 +288,7 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
                 f"🌸 *3D NFT New Era Sold!* 🌸\n\n"
                 f"{emojis}\n"
                 f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
-                f"💰 **Worth:** ${usd_value:.2f}\n"
+                f"💰 **Worth:** ${sale_usd_value:.2f}\n"
                 f"💵 BNB Value: {bnb_value:.4f}\n"
                 f"🦑 Buyer: {shorten_address(wallet_address)}\n"
                 f"[🔍 View on BscScan]({tx_url})\n\n"
@@ -456,7 +459,9 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
         bnb_value = random.uniform(0.01, 0.1)
-        usd_value = PETS_AMOUNT * pets_price
+        listing_pets_amount = random.randint(1000000, 5000000)
+        listing_usd_value = listing_pets_amount * pets_price
+        sale_usd_value = PETS_AMOUNT * pets_price
         wallet_address = f"0x{'{:040x}'.format(random.randint(0, 2**160))}"
         gif_url = get_gif_url('Sale')
 
@@ -464,8 +469,9 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         test_tx_hash = f"0xTestListing{uuid.uuid4().hex[:16]}"
         listing_message = (
             f"🔥 *New 3D NFT New Era Listing* Test 🔥\n\n"
+            f"**Listed for:** {listing_pets_amount:,.0f} $PETS (${listing_usd_value:.2f})\n"
             f"Listed by: {shorten_address(wallet_address)}\n\n"
-            f"Get it on the Marketplace 🎁 now before it's gone 🚀 Join our Ascension Alpha Group to get this notification 60 seconds earlier! 👀\n\n"
+            f"Get it on the Marketplace 🎁! Join our Alpha Group for 60s early alerts! 👀\n\n"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
         success = await send_gif_with_retry(context, chat_id, gif_url, listing_message)
@@ -475,13 +481,13 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Test Sale
         test_tx_hash = f"0xTestSale{uuid.uuid4().hex[:16]}"
-        emoji_count = min(int(usd_value // 100), 100)
+        emoji_count = min(int(sale_usd_value // 100), 100)
         emojis = '💰' * emoji_count
         sale_message = (
             f"🌸 *3D NFT New Era Sold!* Test 🌸\n\n"
             f"{emojis}\n"
             f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
-            f"💰 **Worth:** ${usd_value:.2f}\n"
+            f"💰 **Worth:** ${sale_usd_value:.2f}\n"
             f"💵 BNB Value: {bnb_value:.4f}\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
             f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n"
