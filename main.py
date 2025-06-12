@@ -280,7 +280,7 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
                 f"🔥 *New 3D NFT New Era Listing* 🔥\n\n"
                 f"**Listed for:** {listing_pets_amount:,.0f} $PETS (${listing_usd_value:.2f})\n"
                 f"Listed by: {shorten_address(wallet_address)}\n\n"
-                f"Get it on the Marketplace 🎁! Join our Alpha Group for 60s early alerts! 👀\n\n"
+                f"Get it on the Marketplace 🎁! \n Join our Alpha Group for 60s early alerts! 👀\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
             )
         else:
@@ -471,7 +471,7 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"🔥 *New 3D NFT New Era Listing* Test 🔥\n\n"
             f"**Listed for:** {listing_pets_amount:,.0f} $PETS (${listing_usd_value:.2f})\n"
             f"Listed by: {shorten_address(wallet_address)}\n\n"
-            f"Get it on the Marketplace 🎁! Join our Alpha Group for 60s early alerts! 👀\n\n"
+            f"Get it on the Marketplace 🎁! \n Join our Alpha Group for 60s early alerts! 👀\n\n"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
         )
         success = await send_gif_with_retry(context, chat_id, gif_url, listing_message)
