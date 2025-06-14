@@ -244,7 +244,7 @@ def get_pets_price() -> float:
         price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(PETS_CA.lower(), '0')
         price = float(price_str)
         if price <= 0:
-            raise ValueError("Geckoterminal returned non-positive price")
+            raise ValueError(f"Geckoterminal returned non-positive price: {price_str}")
         logger.info(f"$PETS price from GeckoTerminal: ${price:.10f}")
         return price
     except Exception as e:
@@ -305,7 +305,10 @@ async def fetch_nft_sales(from_block: Optional[int] = None) -> List[Dict]:
         url = f"{ALCHEMY_API}/{ALCHEMY_API_KEY}/getNFTSales"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, params=params, timeout=30) as response:
-                response.raise_for_status()
+                if response.status != 200:
+                    error_data = await response.text()
+                    logger.error(f"Alchemy getNFTSales failed: {response.status}, response: {error_data}")
+                    raise Exception(f"Alchemy API error: {response.status}")
                 data = await response.json()
                 sales = [
                     {
@@ -346,7 +349,7 @@ async def fetch_floor_price() -> Optional[float]:
         logger.error(f"Failed to fetch floor price: {e}")
         return None
 
-async def send_nft_media(context: ContextTypes.DEFAULT_TYPE, chat_id: str, metadata: Dict, caption: str, max_retries: int = 3, delay: int = 2) -> bool:
+async def send_nft_media(context: ContextTypes.DEFAULT_TYPE, chat_id: str, metadata: Dict, caption: str, max_retries: int = 3, delay: int = 1) -> bool:
     """Send NFT video or image to Telegram."""
     for i in range(max_retries):
         try:
@@ -370,7 +373,7 @@ async def send_nft_media(context: ContextTypes.DEFAULT_TYPE, chat_id: str, metad
             await asyncio.sleep(delay)
     return False
 
-async def send_gif_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gif_url: str, caption: str, max_retries: int = 3, delay: int = 2) -> bool:
+async def send_gif_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gif_url: str, caption: str, max_retries: int = 3, delay: int = 1) -> bool:
     for i in range(max_retries):
         try:
             logger.info(f"Attempt {i+1}/{max_retries} to send GIF to chat {chat_id}: {gif_url}")
@@ -443,7 +446,7 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
                 f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n\n"
                 f"**Listed for:** {listing_pets_amount:,.0f} \\$PETS \\(\\${escape_markdown(f'{listing_usd_value:.2f}')}\\)\n\n"
                 f"Listed by: {escape_markdown(shorten_address(wallet_address))}\n\n"
-                f"Get it on the Marketplace 🎁\\! Join our Alpha Group for 60s early alerts\\! 👀\n\n\n"
+                f"Join our Alpha Group for 60s early alerts\\! 👀\n\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
             )
             latest_transactions[category][tx_hash] = {
@@ -558,41 +561,63 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching marketplace stats", parse_mode='MarkdownV2')
     try:
+        # Get latest block number
+        latest_block = w3.eth.block_number
+        # Fetch all recent sales
         sales = await fetch_nft_sales()
+        # Fetch sales in the latest block
+        latest_block_sales = await fetch_nft_sales(from_block=latest_block)
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
         total_usd = sum(PETS_AMOUNT * pets_price for _ in sales)
         total_bnb = total_usd / bnb_price if bnb_price > 0 else 0
-        latest_sale = max(latest_transactions['Sale'].items(), key=lambda x: x[1]['timestamp'], default=(None, {}))
+        # Get latest sale in the block (if any)
+        latest_sale = max(latest_block_sales, key=lambda x: x['timestamp'], default=None)
         latest_listing = max(latest_transactions['Listing'].items(), key=lambda x: x[1]['timestamp'], default=(None, {}))
-        sale_details = (
-            f"**Latest Sale:**\n\n"
-            f"**NFT:** {latest_sale[1].get('nft_name', 'Unknown')} \\(Rarity: {latest_sale[1].get('rarity', 'Unknown')}, Multiplier: {latest_sale[1].get('multiplier', 'Unknown')}\\)\n"
-            f"🦑 Buyer: {escape_markdown(latest_sale[1].get('wallet', ''))}\n"
-            f"🔥 Sold For: {latest_sale[1].get('pets_amount', 0):,.0f} \\$PETS \\(\\${escape_markdown(f'{latest_sale[1].get('usd_value', 0):.2f}')}\\)\n"
-            f"💵 BNB Value: {escape_markdown(f'{latest_sale[1].get('bnb_value', 0):.4f}')}\n\n"
-        ) if latest_sale[0] else "No sales yet\n\n"
+        token_id = None
+        sale_details = "No sales in latest block\n\n"
+        if latest_sale:
+            token_id = latest_sale['tokenId']
+            metadata = await fetch_nft_metadata(token_id) if token_id else None
+            nft_name = escape_markdown(metadata.get('name', 'Unknown')) if metadata else 'Unknown'
+            rarity = escape_markdown(next((attr['value'] for attr in metadata.get('attributes', []) if attr['trait_type'] == 'Rarity Ranking'), 'Unknown')) if metadata else 'Unknown'
+            multiplier = escape_markdown(next((attr['value'] for attr in metadata.get('attributes', []) if attr['trait_type'] == 'Staking Multiplier'), 'Unknown')) if metadata else 'Unknown'
+            sale_usd_value = PETS_AMOUNT * pets_price
+            bnb_value = latest_sale['price'] / 1e18
+            sale_details = (
+                f"**Latest Sale (Block {latest_block}):**\n\n"
+                f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n"
+                f"🦑 Buyer: {escape_markdown(shorten_address(latest_sale['buyer']))}\n"
+                f"🔥 Sold For: {PETS_AMOUNT:,.0f} \\$PETS \\(\\${escape_markdown(f'{sale_usd_value:.2f}')}\\)\n"
+                f"💵 BNB Value: {escape_markdown(f'{bnb_value:.4f}')}\n\n"
+            )
         listing_details = (
             f"**Latest Listing:**\n\n"
             f"**NFT:** {latest_listing[1].get('nft_name', 'Unknown')} \\(Rarity: {latest_listing[1].get('rarity', 'Unknown')}, Multiplier: {latest_listing[1].get('multiplier', 'Unknown')}\\)\n"
             f"Listed by: {escape_markdown(latest_listing[1].get('wallet', ''))}\n"
             f"**Listed for:** {latest_listing[1].get('pets_amount', 0):,.0f} \\$PETS \\(\\${escape_markdown(f'{latest_listing[1].get('usd_value', 0):.2f}')}\\)\n\n"
         ) if latest_listing[0] else "No listings yet\n\n"
-        token_id = latest_sale[1].get('token_id') or latest_listing[1].get('token_id')
-        metadata = metadata_cache.get(token_id, (None, 0))[0] if token_id and metadata_cache.get(token_id, (None, 0))[1] > time.time() else await fetch_nft_metadata(token_id) if token_id else None
         message = (
             f"📊 *NFT Marketplace Stats \\(Recent Transactions\\)*\n\n"
-            f"🌸 **Sales:** {len(sales)}\n\n"
+            f"🌸 **Total Sales:** {len(sales)}\n\n"
             f"💰 **Total \\$PETS:** {len(sales) * PETS_AMOUNT:,.0f} \\(\\${escape_markdown(f'{total_usd:.2f}')}/{escape_markdown(f'{total_bnb:.3f}')} BNB\\)\n\n"
             f"{sale_details}"
             f"{listing_details}"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
         )
         logger.info(f"Sending stats message with length: {len(message)}")
-        await send_nft_media(context, chat_id, metadata or {}, message)
+        if token_id and metadata:
+            await send_nft_media(context, chat_id, metadata, message)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch stats: {escape_markdown(str(e))}", parse_mode='MarkdownV2')
+        message = (
+            f"📊 *NFT Marketplace Stats \\(Recent Transactions\\)*\n\n"
+            f"⚠️ Failed to fetch stats: {escape_markdown(str(e))}\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
+        )
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -668,7 +693,7 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n\n"
             f"**Listed for:** {listing_pets_amount:,.0f} \\$PETS \\(\\${escape_markdown(f'{listing_usd_value:.2f}')}\\)\n\n"
             f"Listed by: {escape_markdown(shorten_address(wallet_address))}\n\n"
-            f"Get it on the Marketplace 🎁\\! Join our Alpha Group for 60s early alerts\\! 👀\n\n\n"
+            f"Join our Alpha Group for 60s early alerts\\! 👀\n\n\n"
             f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
         )
         success = await send_nft_media(context, chat_id, metadata or {}, listing_message)
