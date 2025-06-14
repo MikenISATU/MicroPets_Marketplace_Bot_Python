@@ -12,14 +12,12 @@ from fastapi import FastAPI, HTTPException
 from telegram import Update, BotCommand, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from web3 import Web3
-from bscscan import BscScan
-from tenacity import retry, stop_after_attempt, wait_exponential
-from dotenv import load_dotenv
-from datetime import datetime
 import aiohttp
 import threading
 import io
 from collections import defaultdict
+from dotenv import load_dotenv
+from datetime import datetime
 
 # Logging setup
 logging.basicConfig(
@@ -44,8 +42,8 @@ ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 NFT_CONTRACT_ADDRESS = os.getenv('NFT_CONTRACT_ADDRESS')
-PETS_CA = os.getenv('PETS_CA')
-BNB_RPC_URL = os.getenv('BNB_RPC_URL')
+PETS_CA = os.getenv('PETS_CA', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')  # Default to MicroPets token
+BNB_RPC_URL = os.getenv('BNB_RPC_URL', 'https://bsc-dataseed.binance.org/')
 ADMIN_USER_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 ALPHA_CHAT_ID = os.getenv('ALPHA_CHAT_ID')
@@ -98,13 +96,12 @@ logger.info(f"Environment validated successfully. PORT={PORT}")
 
 # Constants
 FALLBACK_GIF = "https://media.giphy.com/media/3o7bu3X8f7wY5zX9K0/giphy.gif"
-DEFAULT_NFT_IMAGE = "https://content.micropets.io/images/pets/1.png"  # Valid fallback image
-PETS_AMOUNT = 2943823  # Fixed PETS amount for sales
+DEFAULT_NFT_IMAGE = "https://content.micropets.io/images/pets/1.png"
+METADATA_BASE_URL = "https://content.micropets.io/metadata"
 MARKETPLACE_LINK = "https://pets.micropets.io/marketplace"
 CHART_LINK = "https://www.dextools.io/app/en/bnb/pair-explorer/0x4bdece4e422fa015336234e4fc4d39ae6dd75b01?t=1749434278227"
 MERCH_LINK = "https://micropets.store/"
 BUY_PETS_LINK = "https://pancakeswap.finance/swap?outputCurrency=0x2466858ab5edad0bb597fe9f008f568b00d25fe3"
-METADATA_BASE_URL = "https://content.micropets.io/metadata"
 
 # In-memory data
 posted_transactions: Set[str] = set()
@@ -116,18 +113,16 @@ file_lock = threading.Lock()
 bot_app = None
 metadata_cache: Dict[str, tuple[Dict, float]] = {}  # {token_id: (metadata, expiry_timestamp)}
 latest_transactions: Dict[str, Dict] = defaultdict(dict)  # {type: {tx_hash: transaction}}
-last_floor_price: Optional[float] = None
 
-# Initialize Web3 and BscScan
+# Initialize Web3
 try:
-    w3 = Web3(Web3.HTTPProvider(f'https://bsc-dataseed.binance.org/', request_kwargs={'timeout': 60}))
+    w3 = Web3(Web3.HTTPProvider(BNB_RPC_URL, request_kwargs={'timeout': 60}))
     if not w3.is_connected():
         raise Exception("Web3 connection failed")
     logger.info("Successfully initialized Web3 with BNB RPC")
-    bsc = BscScan(BSCSCAN_API_KEY)
 except Exception as e:
-    logger.error(f"Failed to initialize Web3 or BscScan: {e}")
-    raise ValueError("Web3 or BscScan initialization failed")
+    logger.error(f"Failed to initialize Web3: {e}")
+    raise ValueError("Web3 initialization failed")
 
 # Helper functions
 async def initialize_last_block_number():
@@ -147,7 +142,6 @@ def escape_markdown(text: str) -> str:
         text = text.replace(char, f'\\{char}')
     return text
 
-@retry(wait=wait_exponential(multiplier=2, min=5, max=20), stop=stop_after_attempt(2))
 async def fetch_nft_metadata(token_id: str) -> Optional[Dict]:
     """Fetch NFT metadata from MicroPets API."""
     try:
@@ -222,7 +216,6 @@ def log_posted_transaction(transaction_hash: str) -> None:
     except Exception as e:
         logger.error(f"Failed to write to posted_transactions.txt: {e}")
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_pets_price() -> float:
     try:
         headers = {'Accept': 'application/json;version=20230302'}
@@ -241,27 +234,8 @@ def get_pets_price() -> float:
         return price
     except Exception as e:
         logger.error(f"GeckoTerminal $PETS price fetch failed: {e}")
-        try:
-            headers = {'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY}
-            params = {'symbol': 'PETS', 'convert': 'USD'}
-            response = requests.get(
-                "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
-                headers=headers,
-                params=params,
-                timeout=10
-            )
-            response.raise_for_status()
-            data = response.json()
-            price = float(data['data']['PETS']['quote']['USD']['price'])
-            if price <= 0:
-                raise ValueError("CoinMarketCap returned non-positive price")
-            logger.info(f"$PETS price from CoinMarketCap: ${price:.10f}")
-            return price
-        except Exception as e:
-            logger.error(f"CoinMarketCap $PETS price fetch failed: {e}")
-            return 0.00003886
+        return 0.00003886
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_bnb_price() -> float:
     try:
         headers = {'Accept': 'application/json;version=20230302'}
@@ -283,53 +257,68 @@ def get_bnb_price() -> float:
         return 600.0
 
 async def fetch_nft_transactions() -> tuple[List[Dict], List[Dict]]:
-    """Fetch BEP-721 token transfer events using BscScan API."""
+    """Fetch BEP-721 token transfer events using BscScan API with HTTP requests."""
     try:
-        async with BscScan(BSCSCAN_API_KEY) as bsc:
-            transfers = await bsc.get_bep721_token_transfer_events_by_contract_address_paginated(
-                contractaddress=NFT_CONTRACT_ADDRESS,
-                page=1,
-                offset=10,  # Limit to 10 recent transfers
-                sort='desc'
-            )
-            logger.info(f"Fetched {len(transfers)} transfer events for contract {NFT_CONTRACT_ADDRESS}")
+        url = "https://api.bscscan.com/api"
+        params = {
+            'module': 'account',
+            'action': 'tokentx',
+            'contractaddress': NFT_CONTRACT_ADDRESS,
+            'page': 1,
+            'offset': 10,  # Limit to 10 recent transfers
+            'sort': 'desc',
+            'apikey': BSCSCAN_API_KEY
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        transfers = response.json().get('result', [])
+        logger.info(f"Fetched {len(transfers)} transfer events for contract {NFT_CONTRACT_ADDRESS}")
 
-            sales = []
-            listings = []
-            for transfer in transfers:
-                tx_hash = transfer['hash']
-                token_id = transfer['tokenID']
-                from_address = transfer['from']
-                to_address = transfer['to']
-                block_number = transfer['blockNumber']
-                timestamp = int(transfer['timeStamp'])
-                date = datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        sales = []
+        listings = []
+        for transfer in transfers:
+            tx_hash = transfer['hash']
+            token_id = transfer['tokenID']
+            from_address = transfer['from']
+            to_address = transfer['to']
+            block_number = int(transfer['blockNumber'])
+            timestamp = int(transfer['timeStamp'])
+            date = datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
-                # Fetch transaction details to check for payment (indicating a sale)
-                tx_details = await bsc.get_proxy_transaction_by_hash(tx_hash)
-                value_wei = int(tx_details.get('value', 0))
-                bnb_value = value_wei / 1e18 if value_wei > 0 else 0
+            # Fetch transaction details to check for payment (indicating a sale)
+            tx_details_url = "https://api.bscscan.com/api"
+            tx_params = {
+                'module': 'proxy',
+                'action': 'eth_getTransactionByHash',
+                'txhash': tx_hash,
+                'apikey': BSCSCAN_API_KEY
+            }
+            tx_response = requests.get(tx_details_url, params=tx_params, timeout=10)
+            tx_response.raise_for_status()
+            tx_data = tx_response.json().get('result', {})
+            value_wei = int(tx_data.get('value', '0x0'), 16)
+            bnb_value = value_wei / 1e18 if value_wei > 0 else 0
 
-                if bnb_value > 0:
-                    sales.append({
-                        'tx_hash': tx_hash,
-                        'token_id': token_id,
-                        'buyer': to_address,
-                        'seller': from_address,
-                        'price': bnb_value,
-                        'timestamp': timestamp,
-                        'block_number': block_number
-                    })
-                else:
-                    listings.append({
-                        'tx_hash': tx_hash,
-                        'token_id': token_id,
-                        'seller': from_address,
-                        'timestamp': timestamp,
-                        'block_number': block_number
-                    })
+            if bnb_value > 0:
+                sales.append({
+                    'tx_hash': tx_hash,
+                    'token_id': token_id,
+                    'buyer': to_address,
+                    'seller': from_address,
+                    'price': bnb_value,
+                    'timestamp': timestamp,
+                    'block_number': block_number
+                })
+            else:
+                listings.append({
+                    'tx_hash': tx_hash,
+                    'token_id': token_id,
+                    'seller': from_address,
+                    'timestamp': timestamp,
+                    'block_number': block_number
+                })
 
-            return sales, listings
+        return sales, listings
     except Exception as e:
         logger.error(f"Failed to fetch NFT transactions: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
@@ -390,7 +379,7 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
         bnb_value = transaction.get('price', 0)
-        usd_value = bnb_value * bnb_price if is_sale else random.uniform(1, 10) * pets_price  # Simulated USD for listings
+        usd_value = bnb_value * bnb_price if is_sale else random.uniform(1, 10) * pets_price
         wallet_address = transaction.get('buyer') if is_sale else transaction.get('seller')
         tx_url = f"https://bscscan.com/tx/{tx_hash}"
         category = 'Sale' if is_sale else 'Listing'
@@ -454,7 +443,7 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
         return False
 
 async def monitor_transactions(context: ContextTypes.DEFAULT_TYPE) -> None:
-    global last_block_number, is_tracking_enabled, monitoring_task, last_floor_price
+    global last_block_number, is_tracking_enabled, monitoring_task
     logger.info("Starting transaction monitoring")
     while is_tracking_enabled:
         try:
@@ -487,7 +476,7 @@ def is_admin(update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     logger.info(f"Received /start command from user {update.effective_user.id} in chat {chat_id}")
-    await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to MicroPets Marketplace Tracker\\! Use /track to start NFT alerts\\.", parse_mode='MarkdownV2')
+    await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to MicroPets Marketplace Tracker! Use /track to start NFT alerts.", parse_mode='MarkdownV2')
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global is_tracking_enabled, monitoring_task
@@ -615,7 +604,7 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized", parse_mode='MarkdownV2')
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test notifications \\(listing and sale\\)", parse_mode='MarkdownV2')
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test notifications (listing and sale)", parse_mode='MarkdownV2')
     try:
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
