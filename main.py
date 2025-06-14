@@ -33,6 +33,11 @@ telegram_logger.setLevel(logging.WARNING)
 
 # Load environment variables
 load_dotenv()
+logger.info("Loading .env file")
+if not os.path.exists('.env'):
+    logger.warning(".env file not found in current directory")
+
+# Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY')
@@ -46,31 +51,48 @@ MARKET_CHAT_ID = os.getenv('MARKET_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
 POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
 
-# Validate environment variables
-missing_vars = []
-for var, name in [
-    (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
-    (ALCHEMY_API_KEY, 'ALCHEMY_API_KEY'),
-    (COINMARKETCAP_API_KEY, 'COINMARKETCAP_API_KEY'),
-    (NFT_CONTRACT_ADDRESS, 'NFT_CONTRACT_ADDRESS'),
-    (PETS_CA, 'PETS_CA'),
-    (BNB_RPC_URL, 'BNB_RPC_URL'),
-    (ADMIN_USER_ID, 'ADMIN_USER_ID'),
-    (TELEGRAM_CHAT_ID, 'TELEGRAM_CHAT_ID')
-]:
-    if not var:
-        missing_vars.append(name)
+# Log loaded environment variables (mask sensitive values)
+env_vars = {
+    'TELEGRAM_BOT_TOKEN': '***' if TELEGRAM_BOT_TOKEN else None,
+    'ALCHEMY_API_KEY': '***' if ALCHEMY_API_KEY else None,
+    'COINMARKETCAP_API_KEY': '***' if COINMARKETCAP_API_KEY else None,
+    'NFT_CONTRACT_ADDRESS': NFT_CONTRACT_ADDRESS,
+    'PETS_CA': PETS_CA,
+    'BNB_RPC_URL': BNB_RPC_URL,
+    'ADMIN_USER_ID': ADMIN_USER_ID,
+    'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID,
+    'ALPHA_CHAT_ID': ALPHA_CHAT_ID,
+    'MARKET_CHAT_ID': MARKET_CHAT_ID,
+    'PORT': PORT,
+    'POLLING_INTERVAL': POLLING_INTERVAL
+}
+logger.info(f"Loaded environment variables: {json.dumps(env_vars, indent=2)}")
+
+# Validate required environment variables
+required_vars = [
+    ('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN),
+    ('ALCHEMY_API_KEY', ALCHEMY_API_KEY),
+    ('COINMARKETCAP_API_KEY', COINMARKETCAP_API_KEY),
+    ('NFT_CONTRACT_ADDRESS', NFT_CONTRACT_ADDRESS),
+    ('PETS_CA', PETS_CA),
+    ('BNB_RPC_URL', BNB_RPC_URL),
+    ('ADMIN_USER_ID', ADMIN_USER_ID),
+    ('TELEGRAM_CHAT_ID', TELEGRAM_CHAT_ID)
+]
+missing_vars = [name for name, value in required_vars if not value]
 if missing_vars:
-    logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-    raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    error_msg = f"Missing required environment variables: {', '.join(missing_vars)}. Please check .env file or deployment settings."
+    logger.error(error_msg)
+    raise ValueError(error_msg)
 
 # Validate Ethereum addresses
 for addr, name in [(NFT_CONTRACT_ADDRESS, 'NFT_CONTRACT_ADDRESS'), (PETS_CA, 'PETS_CA')]:
     if not Web3.is_address(addr):
-        logger.error(f"Invalid Ethereum address for {name}: {addr}")
-        raise ValueError(f"Invalid Ethereum address for {name}: {addr}")
+        error_msg = f"Invalid Ethereum address for {name}: {addr}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
 
-logger.info(f"Environment loaded successfully. PORT={PORT}")
+logger.info(f"Environment validated successfully. PORT={PORT}")
 
 # Constants
 FALLBACK_GIF = "https://media.giphy.com/media/3o7bu3X8f7wY5zX9K0/giphy.gif"
