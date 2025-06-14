@@ -9,15 +9,18 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set
 from fastapi import FastAPI, HTTPException
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from web3 import Web3
+from web3.logs import STRICT
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
 from datetime import datetime
 import aiohttp
 import threading
 from bs4 import BeautifulSoup
+import io
+from collections import defaultdict
 
 # Logging setup
 logging.basicConfig(
@@ -35,9 +38,12 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 BNB_RPC_URL = os.getenv('BNB_RPC_URL')
-CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3')
+ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY', '5IyUyaJBrZq9eBDKxarcQEkkeBlfUOG_')
+CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2cCFDC83BbdD8bbd2979416620ADB2344B2Cb672')
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+ALPHA_CHAT_ID = os.getenv('ALPHA_CHAT_ID')
+MARKET_CHAT_ID = os.getenv('MARKET_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
 POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
 
@@ -47,6 +53,7 @@ for var, name in [
     (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
     (BSCSCAN_API_KEY, 'BSCSCAN_API_KEY'),
     (BNB_RPC_URL, 'BNB_RPC_URL'),
+    (ALCHEMY_API_KEY, 'ALCHEMY_API_KEY'),
     (CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'),
     (ADMIN_CHAT_ID, 'ADMIN_USER_ID'),
     (TELEGRAM_CHAT_ID, 'TELEGRAM_CHAT_ID')
@@ -72,6 +79,26 @@ MARKETPLACE_LINK = "https://pets.micropets.io/marketplace"
 CHART_LINK = "https://www.dextools.io/app/en/bnb/pair-explorer/0x4bdece4e422fa015336234e4fc4d39ae6dd75b01?t=1749434278227"
 MERCH_LINK = "https://micropets.store/"
 BUY_PETS_LINK = "https://pancakeswap.finance/swap?outputCurrency=0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3"
+ALCHEMY_API = "https://bnb-mainnet.g.alchemy.com/nft/v3"
+IPFS_GATEWAYS = [
+    'https://cloudflare-ipfs.com/ipfs/',
+    'https://ipfs.io/ipfs/',
+    'https://gateway.pinata.cloud/ipfs/'
+]
+
+# ERC-721 ABI for Transfer event
+ERC721_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "from", "type": "address"},
+            {"indexed": True, "name": "to", "type": "address"},
+            {"indexed": True, "name": "tokenId", "type": "uint256"}
+        ],
+        "name": "Transfer",
+        "type": "event"
+    }
+]
 
 # In-memory data
 posted_transactions: Set[str] = set()
@@ -81,13 +108,15 @@ monitoring_task: Optional[asyncio.Task] = None
 recent_errors: List[Dict] = []
 file_lock = threading.Lock()
 bot_app = None
+metadata_cache: Dict[str, tuple[Dict, float]] = {}  # {token_id: (metadata, expiry_timestamp)}
+latest_transactions: Dict[str, Dict] = defaultdict(dict)  # {type: {tx_hash: transaction}}
 
 # Initialize Web3
 try:
-    w3 = Web3(Web3.HTTPProvider(BNB_RPC_URL, request_kwargs={'timeout': 60}))
+    w3 = Web3(Web3.HTTPProvider(f'https://bnb-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}', request_kwargs={'timeout': 60}))
     if not w3.is_connected():
         raise Exception("Primary RPC URL connection failed")
-    logger.info("Successfully initialized Web3 with BNB_RPC_URL")
+    logger.info("Successfully initialized Web3 with Alchemy RPC")
 except Exception as e:
     logger.error(f"Failed to initialize Web3 with primary URL: {e}")
     w3 = Web3(Web3.HTTPProvider('https://bsc-dataseed2.binance.org', request_kwargs={'timeout': 60}))
@@ -95,6 +124,8 @@ except Exception as e:
         logger.error("Fallback RPC URL connection failed")
         raise ValueError("Both primary and fallback Web3 connections failed")
     logger.info("Web3 initialized with fallback")
+
+contract = w3.eth.contract(address=Web3.to_checksum_address(CONTRACT_ADDRESS), abi=ERC721_ABI)
 
 # Helper functions
 async def initialize_last_block_number():
@@ -104,6 +135,61 @@ async def initialize_last_block_number():
         logger.info(f"Initialized last_block_number to {last_block_number}")
     except Exception as e:
         logger.error(f"Failed to initialize last_block_number: {e}")
+
+def ipfs_to_http(ipfs_url: str, gateways: List[str] = IPFS_GATEWAYS) -> str:
+    try:
+        cid = ipfs_url.replace('ipfs://', '')
+        return gateways[0] + cid
+    except Exception as e:
+        logger.error(f"Failed to convert IPFS URL {ipfs_url}: {e}")
+        return None
+
+@retry(wait=wait_exponential(multiplier=2, min=5, max=20), stop=stop_after_attempt(2))
+async def fetch_nft_metadata(token_id: str) -> Optional[Dict]:
+    """Fetch NFT metadata using Alchemy."""
+    try:
+        headers = {'accept': 'application/json'}
+        url = f"{ALCHEMY_API}/{ALCHEMY_API_KEY}/getNFTMetadata?contractAddress={CONTRACT_ADDRESS}&tokenId={token_id}&refreshCache=false"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as response:
+                response.raise_for_status()
+                data = await response.json()
+                metadata = {
+                    'name': data.get('title') or data.get('metadata', {}).get('name'),
+                    'image': data.get('media', [{}])[0].get('gateway') or data.get('metadata', {}).get('image'),
+                    'animation_url': data.get('metadata', {}).get('animation_url'),
+                    'attributes': data.get('metadata', {}).get('attributes', [])
+                }
+                if metadata['image'] and metadata['image'].startswith('ipfs://'):
+                    metadata['image'] = ipfs_to_http(metadata['image'])
+                if metadata['animation_url'] and metadata['animation_url'].startswith('ipfs://'):
+                    metadata['animation_url'] = ipfs_to_http(metadata['animation_url'])
+                metadata_cache[token_id] = (metadata, time.time() + 24 * 3600)  # Cache for 24 hours
+                logger.info(f"Fetched metadata for token {token_id}")
+                return metadata
+    except Exception as e:
+        logger.error(f"Failed to fetch metadata for token {token_id}: {e}")
+        return None
+
+async def download_media(url: str) -> Optional[io.BytesIO]:
+    """Download media to memory."""
+    for gateway in IPFS_GATEWAYS:
+        try:
+            if url.startswith('ipfs://'):
+                url = url.replace('ipfs://', gateway)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=5) as response:
+                    if response.status != 200:
+                        logger.error(f"Media download failed, status {response.status}: {url}")
+                        continue
+                    data = io.BytesIO(await response.read())
+                    data.name = 'nft.mp4' if url.endswith('.mp4') else 'nft.jpg'
+                    logger.info(f"Downloaded media from {url}")
+                    return data
+        except Exception as e:
+            logger.error(f"Failed to download media from {gateway}: {e}")
+            continue
+    return None
 
 def get_gif_url(category: str) -> str:
     try:
@@ -115,8 +201,8 @@ def get_gif_url(category: str) -> str:
         soup = BeautifulSoup(response.text, 'html.parser')
         gif_elements = soup.find_all('img', src=lambda x: x and x.endswith('.gif'))
         if gif_elements:
-            return random.choice(gif_elements)['src']
-        logger.warning("No GIFs found on the page, using fallback")
+            return random.choice([elem['src'] for elem in gif_elements])
+        logger.warning("No GIFs found, using fallback")
         return FALLBACK_GIF
     except Exception as e:
         logger.error(f"Failed to scrape GIF URL: {e}")
@@ -186,6 +272,56 @@ def get_bnb_price() -> float:
         logger.error(f"GeckoTerminal BNB price fetch failed: {e}")
         return 600.0
 
+async def get_token_id_from_tx(tx_hash: str) -> Optional[str]:
+    """Parse Transfer event from transaction receipt to get token ID."""
+    try:
+        receipt = w3.eth.get_transaction_receipt(tx_hash)
+        logs = contract.events.Transfer().process_receipt(receipt, errors=STRICT)
+        if logs:
+            return str(logs[0]['args']['tokenId'])
+        logger.warning(f"No Transfer event found in tx {tx_hash}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to parse token ID from tx {tx_hash}: {e}")
+        return None
+
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+async def fetch_nft_sales(from_block: Optional[int] = None) -> List[Dict]:
+    """Fetch NFT sales using Alchemy."""
+    try:
+        headers = {'accept': 'application/json'}
+        params = {
+            'contractAddress': CONTRACT_ADDRESS,
+            'limit': 100,
+            'order': 'desc'
+        }
+        if from_block:
+            params['fromBlock'] = hex(from_block)
+        url = f"{ALCHEMY_API}/{ALCHEMY_API_KEY}/getNFTSales"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params, timeout=30) as response:
+                response.raise_for_status()
+                data = await response.json()
+                sales = [
+                    {
+                        'transactionHash': sale.get('transactionHash'),
+                        'buyer': sale.get('buyerAddress'),
+                        'seller': sale.get('sellerAddress'),
+                        'tokenId': str(sale.get('tokenId')),
+                        'price': int(sale.get('price', {}).get('value', 0)),
+                        'blockNumber': int(sale.get('blockNumber', 0)),
+                        'timestamp': int(sale.get('timestamp', 0))
+                    }
+                    for sale in data.get('nftSales', [])
+                    if sale.get('buyerAddress') and sale.get('tokenId')
+                ]
+                logger.info(f"Fetched {len(sales)} NFT sales from Alchemy")
+                return sales
+    except Exception as e:
+        logger.error(f"Failed to fetch NFT sales: {e}")
+        recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
+        return []
+
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock: Optional[int] = None) -> List[Dict]:
     global last_block_number
@@ -229,9 +365,34 @@ async def fetch_bscscan_transactions(startblock: Optional[int] = None, endblock:
     except Exception as e:
         logger.error(f"Failed to fetch BscScan transactions: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
-        if len(recent_errors) > 5:
-            recent_errors.pop(0)
         return []
+
+async def send_nft_media(context: ContextTypes.DEFAULT_TYPE, chat_id: str, metadata: Dict, caption: str, max_retries: int = 3, delay: int = 2) -> bool:
+    """Send NFT video or image to Telegram."""
+    for i in range(max_retries):
+        try:
+            logger.info(f"Attempt {i+1}/{max_retries} to send media to chat {chat_id}")
+            media_url = metadata.get('animation_url') or metadata.get('image')
+            if not media_url:
+                logger.error("No media URL available")
+                return await send_gif_with_retry(context, chat_id, get_gif_url('NFT'), caption)
+            media_data = await download_media(media_url)
+            if not media_data:
+                logger.error(f"Failed to download media: {media_url}")
+                return await send_gif_with_retry(context, chat_id, get_gif_url('NFT'), caption)
+            logger.info(f"Sending media message with caption length: {len(caption)}")
+            if media_url.endswith('.mp4'):
+                await context.bot.send_video(chat_id=chat_id, video=InputFile(media_data), caption=caption, parse_mode='MarkdownV2')
+            else:
+                await context.bot.send_photo(chat_id=chat_id, photo=InputFile(media_data), caption=caption, parse_mode='MarkdownV2')
+            logger.info(f"Successfully sent media to chat {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send media (attempt {i+1}/{max_retries}): {e}")
+            if i == max_retries - 1:
+                return await send_gif_with_retry(context, chat_id, get_gif_url('NFT'), caption)
+            await asyncio.sleep(delay)
+    return False
 
 async def send_gif_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: str, gif_url: str, caption: str, max_retries: int = 3, delay: int = 2) -> bool:
     for i in range(max_retries):
@@ -242,19 +403,20 @@ async def send_gif_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: str, 
                     if head_response.status != 200:
                         logger.error(f"GIF URL inaccessible, status {head_response.status}: {gif_url}")
                         gif_url = FALLBACK_GIF
-            await context.bot.send_animation(chat_id=chat_id, animation=gif_url, caption=caption, parse_mode='Markdown')
+            logger.info(f"Sending GIF message with caption length: {len(caption)}")
+            await context.bot.send_animation(chat_id=chat_id, animation=gif_url, caption=caption, parse_mode='MarkdownV2')
             logger.info(f"Successfully sent GIF to chat {chat_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to send GIF (attempt {i+1}/{max_retries}): {e}")
             if i == max_retries - 1:
-                await context.bot.send_message(chat_id, f"{caption}\n\n⚠️ GIF unavailable", parse_mode='Markdown')
+                await context.bot.send_message(chat_id, f"{caption}\n\n⚠️ GIF unavailable", parse_mode='MarkdownV2')
                 return False
             await asyncio.sleep(delay)
     return False
 
-async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: Dict, chat_id: str = TELEGRAM_CHAT_ID) -> bool:
-    global posted_transactions
+async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: Dict, is_sale: bool, token_id: Optional[str] = None, chat_id: str = TELEGRAM_CHAT_ID) -> bool:
+    global posted_transactions, latest_transactions
     try:
         tx_hash = transaction['transactionHash']
         if tx_hash in posted_transactions:
@@ -262,47 +424,79 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
             return False
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
-        value_wei = int(transaction['value']) if transaction['value'].isdigit() else 0
+        value_wei = int(transaction.get('value', '0')) if transaction.get('value', '0').isdigit() else 0
         bnb_value = value_wei / 1e18
-        listing_pets_amount = random.randint(1000000, 5000000)  # Random $PETS for listings
+        listing_pets_amount = random.randint(1000000, 5000000)
         listing_usd_value = listing_pets_amount * pets_price
         sale_usd_value = PETS_AMOUNT * pets_price
-        is_sale = bnb_value > 0  # Assume sale if value > 0
-        is_listing = not is_sale  # Assume listing if no value
-        wallet_address = transaction['to'] if is_sale else transaction['from']
+        wallet_address = transaction.get('buyer', transaction.get('to')) if is_sale else transaction.get('from')
         tx_url = f"https://bscscan.com/tx/{tx_hash}"
         category = 'Sale' if is_sale else 'Listing'
-        gif_url = get_gif_url(category)
+        # Fetch metadata
+        if not token_id:
+            token_id = await get_token_id_from_tx(tx_hash)
+        metadata = metadata_cache.get(token_id, (None, 0))[0] if token_id and metadata_cache.get(token_id, (None, 0))[1] > time.time() else await fetch_nft_metadata(token_id) if token_id else None
+        nft_name = metadata.get('name', 'Unknown NFT') if metadata else 'Unknown NFT'
+        rarity = next((attr['value'] for attr in metadata.get('attributes', []) if attr['trait_type'] == 'Rarity Ranking'), 'Unknown') if metadata else 'Unknown'
+        multiplier = next((attr['value'] for attr in metadata.get('attributes', []) if attr['trait_type'] == 'Staking Multiplier'), 'Unknown') if metadata else 'Unknown'
         emoji_count = min(int(sale_usd_value // 100) if is_sale else 10, 100)
         emojis = '💰' * emoji_count
         if is_listing:
             message = (
                 f"🔥 *New 3D NFT New Era Listing* 🔥\n\n"
-                f"**Listed for:** {listing_pets_amount:,.0f} $PETS (${listing_usd_value:.2f})\n"
+                f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n\n"
+                f"**Listed for:** {listing_pets_amount:,.0f} \\$PETS \\(${listing_usd_value:.2f}\\)\n\n"
                 f"Listed by: {shorten_address(wallet_address)}\n\n"
-                f"Get it on the Marketplace 🎁!\n Join our Alpha Group for 60s early alerts! 👀\n\n"
-                f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) |\n 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+                f"Get it on the Marketplace 🎁\\! Join our Alpha Group for 60s early alerts\\! 👀\n\n\n"
+                f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
             )
+            latest_transactions[category][tx_hash] = {
+                'wallet': wallet_address,
+                'pets_amount': listing_pets_amount,
+                'usd_value': listing_usd_value,
+                'bnb_value': 0,
+                'timestamp': transaction['timeStamp'],
+                'token_id': token_id,
+                'nft_name': nft_name,
+                'rarity': rarity,
+                'multiplier': multiplier
+            }
         else:
             message = (
                 f"🌸 *3D NFT New Era Sold!* 🌸\n\n"
-                f"{emojis}\n"
-                f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
-                f"💰 **Worth:** ${sale_usd_value:.2f}\n"
-                f"💵 BNB Value: {bnb_value:.4f}\n"
+                f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n\n"
+                f"{emojis}\n\n"
+                f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} \\$PETS\n\n"
+                f"💰 **Worth:** \\${sale_usd_value:.2f}\n\n"
+                f"💵 BNB Value: {bnb_value:.4f}\n\n"
                 f"🦑 Buyer: {shorten_address(wallet_address)}\n"
-                f"[🔍 View on BscScan]({tx_url})\n\n"
-                f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) |\n 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+                f"[🔍 View on BscScan]({tx_url})\n\n\n"
+                f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
             )
-        success = await send_gif_with_retry(context, chat_id, gif_url, message)
+            latest_transactions[category][tx_hash] = {
+                'wallet': wallet_address,
+                'pets_amount': PETS_AMOUNT,
+                'usd_value': sale_usd_value,
+                'bnb_value': bnb_value,
+                'timestamp': transaction['timestamp'] if 'timestamp' in transaction else transaction['timeStamp'],
+                'token_id': token_id,
+                'nft_name': nft_name,
+                'rarity': rarity,
+                'multiplier': multiplier
+            }
+        success = await send_nft_media(context, chat_id, metadata or {}, message)
         if success:
             posted_transactions.add(tx_hash)
             log_posted_transaction(tx_hash)
             logger.info(f"Processed transaction {tx_hash} for chat {chat_id}")
+            # Send to additional chat IDs
+            for extra_chat_id in [ALPHA_CHAT_ID, MARKET_CHAT_ID]:
+                if extra_chat_id and extra_chat_id != chat_id:
+                    await send_nft_media(context, extra_chat_id, metadata or {}, message)
             return True
         return False
     except Exception as e:
-        logger.error(f"Error processing transaction {transaction.get('transactionHash', 'unknown')}: {e}")
+        logger.error(f"Error processing transaction {tx_hash}: {e}")
         return False
 
 async def monitor_transactions(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,15 +504,19 @@ async def monitor_transactions(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Starting transaction monitoring")
     while is_tracking_enabled:
         try:
+            # Fetch sales from Alchemy
+            sales = await fetch_nft_sales(from_block=last_block_number + 1 if last_block_number else None)
+            for sale in sorted(sales, key=lambda x: x['blockNumber'], reverse=True):
+                if sale['transactionHash'] in posted_transactions:
+                    continue
+                await process_transaction(context, sale, is_sale=True, token_id=sale['tokenId'])
+            # Fetch transactions from BscScan
             transactions = await fetch_bscscan_transactions(startblock=last_block_number + 1 if last_block_number else None)
-            if not transactions:
-                logger.info("No new transactions found")
-                await asyncio.sleep(POLLING_INTERVAL)
-                continue
             for tx in sorted(transactions, key=lambda x: x['blockNumber'], reverse=True):
                 if tx['transactionHash'] in posted_transactions:
                     continue
-                await process_transaction(context, tx)
+                is_sale = int(tx['value']) > 0
+                await process_transaction(context, tx, is_sale=is_sale)
             await asyncio.sleep(POLLING_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Monitoring task cancelled")
@@ -339,28 +537,28 @@ def is_admin(update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     logger.info(f"Received /start command from user {update.effective_user.id} in chat {chat_id}")
-    await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to MicroPets Marketplace Tracker! Use /track to start NFT alerts.")
+    await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to MicroPets Marketplace Tracker\\! Use /track to start NFT alerts\\.", parse_mode='MarkdownV2')
 
 async def track(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global is_tracking_enabled, monitoring_task
     chat_id = update.effective_chat.id
     logger.info(f"Received /track command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized", parse_mode='MarkdownV2')
         return
     if is_tracking_enabled:
-        await context.bot.send_message(chat_id=chat_id, text="🚀 Tracking already enabled")
+        await context.bot.send_message(chat_id=chat_id, text="🚀 Tracking already enabled", parse_mode='MarkdownV2')
         return
     is_tracking_enabled = True
     monitoring_task = asyncio.create_task(monitor_transactions(context))
-    await context.bot.send_message(chat_id=chat_id, text="🚖 Tracking started")
+    await context.bot.send_message(chat_id=chat_id, text="🚖 Tracking started", parse_mode='MarkdownV2')
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global is_tracking_enabled, monitoring_task
     chat_id = update.effective_chat.id
     logger.info(f"Received /stop command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized", parse_mode='MarkdownV2')
         return
     is_tracking_enabled = False
     if monitoring_task:
@@ -370,38 +568,55 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except asyncio.CancelledError:
             logger.info("Monitoring task cancelled")
         monitoring_task = None
-    await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
+    await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped", parse_mode='MarkdownV2')
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     logger.info(f"Received /stats command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized", parse_mode='MarkdownV2')
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching marketplace stats")
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching marketplace stats", parse_mode='MarkdownV2')
     try:
+        sales = await fetch_nft_sales()
         transactions = await fetch_bscscan_transactions()
-        if not transactions:
-            await context.bot.send_message(chat_id=chat_id, text="🚫 No transactions found")
-            return
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
-        sales = [tx for tx in transactions if int(tx['value']) > 0]
+        bsc_sales = [tx for tx in transactions if int(tx['value']) > 0]
         listings = [tx for tx in transactions if int(tx['value']) == 0]
-        total_usd = sum(PETS_AMOUNT * pets_price for _ in sales)
+        total_usd = sum(PETS_AMOUNT * pets_price for _ in bsc_sales) + sum(int(sale['price']) / 1e18 * pets_price for sale in sales)
         total_bnb = total_usd / bnb_price if bnb_price > 0 else 0
-        gif_url = get_gif_url('Sale' if sales else 'Listing')
+        latest_sale = max(latest_transactions['Sale'].items(), key=lambda x: x[1]['timestamp'], default=(None, {}))
+        latest_listing = max(latest_transactions['Listing'].items(), key=lambda x: x[1]['timestamp'], default=(None, {}))
+        sale_details = (
+            f"**Latest Sale:**\n\n"
+            f"**NFT:** {latest_sale[1].get('nft_name', 'Unknown')} \\(Rarity: {latest_sale[1].get('rarity', 'Unknown')}, Multiplier: {latest_sale[1].get('multiplier', 'Unknown')}\\)\n"
+            f"🦑 Buyer: {shorten_address(latest_sale[1].get('wallet', ''))}\n"
+            f"🔥 Sold For: {latest_sale[1].get('pets_amount', 0):,.0f} \\$PETS \\(${latest_sale[1].get('usd_value', 0):.2f}\\)\n"
+            f"💵 BNB Value: {latest_sale[1].get('bnb_value', 0):.4f}\n\n"
+        ) if latest_sale[0] else "No sales yet\n\n"
+        listing_details = (
+            f"**Latest Listing:**\n\n"
+            f"**NFT:** {latest_listing[1].get('nft_name', 'Unknown')} \\(Rarity: {latest_listing[1].get('rarity', 'Unknown')}, Multiplier: {latest_listing[1].get('multiplier', 'Unknown')}\\)\n"
+            f"Listed by: {shorten_address(latest_listing[1].get('wallet', ''))}\n"
+            f"**Listed for:** {latest_listing[1].get('pets_amount', 0):,.0f} \\$PETS \\(${latest_listing[1].get('usd_value', 0):.2f}\\)\n\n"
+        ) if latest_listing[0] else "No listings yet\n\n"
+        token_id = latest_sale[1].get('token_id') or latest_listing[1].get('token_id')
+        metadata = metadata_cache.get(token_id, (None, 0))[0] if token_id and metadata_cache.get(token_id, (None, 0))[1] > time.time() else await fetch_nft_metadata(token_id) if token_id else None
         message = (
-            f"📊 *NFT Marketplace Stats (Recent Transactions)*\n\n"
-            f"🔥 New Listings: {len(listings)}\n"
-            f"🌸 Sales: {len(sales)}\n"
-            f"💰 Total $PETS: {len(sales) * PETS_AMOUNT:,.0f} (${total_usd:.2f}/{total_bnb:.3f} BNB)\n\n"
-            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+            f"📊 *NFT Marketplace Stats \\(Recent Transactions\\)*\n\n"
+            f"🔥 **New Listings:** {len(listings)}\n\n"
+            f"🌸 **Sales:** {len(sales) + len(bsc_sales)}\n\n"
+            f"💰 **Total \\$PETS:** {(len(bsc_sales) * PETS_AMOUNT + sum(int(sale['price']) / 1e18 for sale in sales)):,.0f} \\(\\$ {total_usd:.2f}/{total_bnb:.3f} BNB\\)\n\n"
+            f"{sale_details}"
+            f"{listing_details}"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
         )
-        await send_gif_with_retry(context, chat_id, gif_url, message)
+        logger.info(f"Sending stats message with length: {len(message)}")
+        await send_nft_media(context, chat_id, metadata or {}, message)
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch stats: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch stats: {str(e)}", parse_mode='MarkdownV2')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -420,7 +635,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"/debug - Debug info\n"
             f"/help - This message\n"
         ),
-        parse_mode='Markdown'
+        parse_mode='MarkdownV2'
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -429,7 +644,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"🔍 *Status:* {'Enabled' if is_tracking_enabled else 'Disabled'}",
-        parse_mode='Markdown'
+        parse_mode='MarkdownV2'
     )
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -440,21 +655,22 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         'lastBlockNumber': last_block_number,
         'recentErrors': recent_errors[-5:],
         'apiStatus': {'bscWeb3': bool(w3.is_connected())},
-        'botRunning': bot_app.running if bot_app else False
+        'botRunning': bot_app.running if bot_app else False,
+        'metadataCache': list(metadata_cache.keys())
     }
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```",
-        parse_mode='Markdown'
+        parse_mode='MarkdownV2'
     )
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     logger.info(f"Received /test command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized", parse_mode='MarkdownV2')
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test notifications (listing and sale)")
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test notifications \\(listing and sale\\)", parse_mode='MarkdownV2')
     try:
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
@@ -463,20 +679,25 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         listing_usd_value = listing_pets_amount * pets_price
         sale_usd_value = PETS_AMOUNT * pets_price
         wallet_address = f"0x{'{:040x}'.format(random.randint(0, 2**160))}"
-        gif_url = get_gif_url('Sale')
+        token_id = '130'  # Use sample token ID for test
+        metadata = await fetch_nft_metadata(token_id)
+        nft_name = metadata.get('name', 'Test NFT') if metadata else 'Test NFT'
+        rarity = next((attr['value'] for attr in metadata.get('attributes', []) if attr['trait_type'] == 'Rarity Ranking'), 'Test') if metadata else 'Test'
+        multiplier = next((attr['value'] for attr in metadata.get('attributes', []) if attr['trait_type'] == 'Staking Multiplier'), 'Test') if metadata else 'Test'
 
         # Test Listing
         test_tx_hash = f"0xTestListing{uuid.uuid4().hex[:16]}"
         listing_message = (
             f"🔥 *New 3D NFT New Era Listing* Test 🔥\n\n"
-            f"**Listed for:** {listing_pets_amount:,.0f} $PETS (${listing_usd_value:.2f})\n"
+            f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n\n"
+            f"**Listed for:** {listing_pets_amount:,.0f} \\$PETS \\(${listing_usd_value:.2f}\\)\n\n"
             f"Listed by: {shorten_address(wallet_address)}\n\n"
-            f"Get it on the Marketplace 🎁!\n Join our Alpha Group for 60s early alerts! 👀\n\n"
-            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) |\n 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+            f"Get it on the Marketplace 🎁\\! Join our Alpha Group for 60s early alerts\\! 👀\n\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
         )
-        success = await send_gif_with_retry(context, chat_id, gif_url, listing_message)
+        success = await send_nft_media(context, chat_id, metadata or {}, listing_message)
         if not success:
-            await context.bot.send_message(chat_id=chat_id, text="🚫 Listing test failed: Unable to send notification")
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Listing test failed: Unable to send notification", parse_mode='MarkdownV2')
             return
 
         # Test Sale
@@ -485,30 +706,31 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         emojis = '💰' * emoji_count
         sale_message = (
             f"🌸 *3D NFT New Era Sold!* Test 🌸\n\n"
-            f"{emojis}\n"
-            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
-            f"💰 **Worth:** ${sale_usd_value:.2f}\n"
-            f"💵 BNB Value: {bnb_value:.4f}\n"
+            f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n\n"
+            f"{emojis}\n\n"
+            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} \\$PETS\n\n"
+            f"💰 **Worth:** \\${sale_usd_value:.2f}\n\n"
+            f"💵 BNB Value: {bnb_value:.4f}\n\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
-            f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n"
-            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) |\n 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+            f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
         )
-        success = await send_gif_with_retry(context, chat_id, gif_url, sale_message)
+        success = await send_nft_media(context, chat_id, metadata or {}, sale_message)
         if success:
-            await context.bot.send_message(chat_id=chat_id, text="✅ Both tests successful")
+            await context.bot.send_message(chat_id=chat_id, text="✅ Both tests successful", parse_mode='MarkdownV2')
         else:
-            await context.bot.send_message(chat_id=chat_id, text="🚫 Sale test failed: Unable to send notification")
+            await context.bot.send_message(chat_id=chat_id, text="🚫 Sale test failed: Unable to send notification", parse_mode='MarkdownV2')
     except Exception as e:
         logger.error(f"Test error: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}", parse_mode='MarkdownV2')
 
 async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     logger.info(f"Received /nov command from user {update.effective_user.id} in chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized", parse_mode='MarkdownV2')
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Testing notification without image")
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Testing notification without image", parse_mode='MarkdownV2')
     try:
         test_tx_hash = f"0xTestNoV{uuid.uuid4().hex[:16]}"
         pets_price = get_pets_price()
@@ -520,19 +742,21 @@ async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         emojis = '💰' * emoji_count
         message = (
             f"🌸 *3D NFT New Era Sold!* Test 🌸\n\n"
-            f"{emojis}\n"
-            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} $PETS\n"
-            f"💰 **Worth:** ${usd_value:.2f}\n"
-            f"💵 BNB Value: {bnb_value:.4f}\n"
+            f"**NFT:** Test NFT \\(Rarity: Test, Multiplier: Test\\)\n\n"
+            f"{emojis}\n\n"
+            f"🔥 **Sold For:** {PETS_AMOUNT:,.0f} \\$PETS\n\n"
+            f"💰 **Worth:** \\${usd_value:.2f}\n\n"
+            f"💵 BNB Value: {bnb_value:.4f}\n\n"
             f"🦑 Buyer: {shorten_address(wallet_address)}\n"
-            f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n"
-            f"📦 [Marketplace]({MARKETPLACE_LINK}) | 📈 [Chart]({CHART_LINK}) | 🛍 [Merch]({MERCH_LINK}) | 💰 [Buy $PETS]({BUY_PETS_LINK})"
+            f"[🔍 View on BscScan](https://bscscan.com/tx/{test_tx_hash})\n\n\n"
+            f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
         )
-        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-        await context.bot.send_message(chat_id=chat_id, text="✅ Test successful")
+        logger.info(f"Sending /nov message with length: {len(message)}")
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='MarkdownV2')
+        await context.bot.send_message(chat_id=chat_id, text="✅ Test successful", parse_mode='MarkdownV2')
     except Exception as e:
         logger.error(f"/nov error: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Test failed: {str(e)}", parse_mode='MarkdownV2')
 
 # FastAPI app
 app = FastAPI()
@@ -559,7 +783,6 @@ async def lifespan(app: FastAPI):
         await initialize_last_block_number()
         posted_transactions.update(load_posted_transactions())
         bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        # Register command handlers
         handlers = [
             CommandHandler("start", start),
             CommandHandler("track", track),
@@ -573,7 +796,6 @@ async def lifespan(app: FastAPI):
         ]
         for handler in handlers:
             bot_app.add_handler(handler)
-        # Set bot commands
         commands = [
             BotCommand("start", "Start the bot"),
             BotCommand("track", "Start tracking events"),
@@ -618,7 +840,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
-# Attach lifespan to FastAPI app
 app = FastAPI(lifespan=lifespan)
 
 if __name__ == "__main__":
