@@ -1,9 +1,8 @@
-fastapi==0.115.0
-python-telegram-bot==20.8
-web3==7.3.0
+python-telegram-bot==20.6
+fastapi==0.110.2
+uvicorn==0.29.0
+web3.py==6.18.0
+bscscan-python==0.1.2
+aiohttp==3.9.5
 python-dotenv==1.0.1
-tenacity==9.0.0
-aiohttp==3.10.10
-uvicorn==0.31.0
-requests==2.32.3
-beautifulsoup4==4.12.3
+tenacity==8.2.3
