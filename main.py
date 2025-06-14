@@ -6,18 +6,24 @@ import asyncio
 import json
 import time
 import uuid
+import sqlite3
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, List, Set
 from fastapi import FastAPI, HTTPException
 from telegram import Update, BotCommand, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.utils.helpers import escape_markdown as telegram_escape_markdown
 from web3 import Web3
+from web3.contract import Contract
+from web3._utils.events import get_event_data
+from web3._utils.filters import construct_event_filter_params
 import aiohttp
 import threading
 import io
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dotenv import load_dotenv
 from datetime import datetime
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Logging setup
 logging.basicConfig(
@@ -42,16 +48,16 @@ ALCHEMY_API_KEY = os.getenv('ALCHEMY_API_KEY')
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 NFT_CONTRACT_ADDRESS = os.getenv('NFT_CONTRACT_ADDRESS')
-PETS_CA = os.getenv('PETS_CA', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')  # Default to MicroPets token
+PETS_CA = os.getenv('PETS_CA', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')
 BNB_RPC_URL = os.getenv('BNB_RPC_URL', 'https://bsc-dataseed.binance.org/')
 ADMIN_USER_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 ALPHA_CHAT_ID = os.getenv('ALPHA_CHAT_ID')
 MARKET_CHAT_ID = os.getenv('MARKET_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
-POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
+POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 10))  # Reduced for Web3
 
-# Log loaded environment variables (mask sensitive values)
+# Log environment variables (mask sensitive)
 env_vars = {
     'TELEGRAM_BOT_TOKEN': '***' if TELEGRAM_BOT_TOKEN else None,
     'ALCHEMY_API_KEY': '***' if ALCHEMY_API_KEY else None,
@@ -69,7 +75,7 @@ env_vars = {
 }
 logger.info(f"Loaded environment variables: {json.dumps(env_vars, indent=2)}")
 
-# Validate required environment variables
+# Validate environment variables
 required_vars = [
     ('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN),
     ('BSCSCAN_API_KEY', BSCSCAN_API_KEY),
@@ -81,7 +87,7 @@ required_vars = [
 ]
 missing_vars = [name for name, value in required_vars if not value]
 if missing_vars:
-    error_msg = f"Missing required environment variables: {', '.join(missing_vars)}. Please check .env file or deployment settings."
+    error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
     logger.error(error_msg)
     raise ValueError(error_msg)
 
@@ -109,10 +115,9 @@ last_block_number: Optional[int] = None
 is_tracking_enabled: bool = False
 monitoring_task: Optional[asyncio.Task] = None
 recent_errors: List[Dict] = []
-file_lock = threading.Lock()
 bot_app = None
-metadata_cache: Dict[str, tuple[Dict, float]] = {}  # {token_id: (metadata, expiry_timestamp)}
-latest_transactions: Dict[str, Dict] = defaultdict(dict)  # {type: {tx_hash: transaction}}
+metadata_cache: OrderedDict[str, tuple[Dict, float]] = OrderedDict()
+latest_transactions: Dict[str, Dict] = defaultdict(dict)
 
 # Initialize Web3
 try:
@@ -124,6 +129,52 @@ except Exception as e:
     logger.error(f"Failed to initialize Web3: {e}")
     raise ValueError("Web3 initialization failed")
 
+# NFT Contract ABI
+NFT_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "from", "type": "address"},
+            {"indexed": True, "name": "to", "type": "address"},
+            {"indexed": True, "name": "tokenId", "type": "uint256"}
+        ],
+        "name": "Transfer",
+        "type": "event"
+    }
+]
+
+# SQLite database
+def init_db():
+    try:
+        with sqlite3.connect('transactions.db') as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS posted_transactions (
+                    tx_hash TEXT PRIMARY KEY
+                )
+            ''')
+            conn.commit()
+            logger.info("Initialized SQLite database")
+    except Exception as e:
+        logger.error(f"Failed to initialize SQLite database: {e}")
+        raise
+
+def load_posted_transactions() -> Set[str]:
+    try:
+        with sqlite3.connect('transactions.db') as conn:
+            cursor = conn.execute('SELECT tx_hash FROM posted_transactions')
+            return set(row[0] for row in cursor.fetchall())
+    except Exception as e:
+        logger.warning(f"Could not load posted transactions: {e}")
+        return set()
+
+def log_posted_transaction(transaction_hash: str) -> None:
+    try:
+        with sqlite3.connect('transactions.db') as conn:
+            conn.execute('INSERT INTO posted_transactions (tx_hash) VALUES (?)', (transaction_hash,))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to log transaction {transaction_hash}: {e}")
+
 # Helper functions
 async def initialize_last_block_number():
     global last_block_number
@@ -134,16 +185,14 @@ async def initialize_last_block_number():
         logger.error(f"Failed to initialize last_block_number: {e}")
 
 def escape_markdown(text: str) -> str:
-    """Escape special characters for MarkdownV2."""
     if not isinstance(text, str):
         text = str(text)
-    special_chars = r'_*[]()~`>#+-=|{}.!'
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
+    return telegram_escape_markdown(text, version=2)
 
 async def fetch_nft_metadata(token_id: str) -> Optional[Dict]:
-    """Fetch NFT metadata from MicroPets API."""
+    if token_id in metadata_cache and metadata_cache[token_id][1] > time.time():
+        return metadata_cache[token_id][0]
+    
     try:
         url = f"{METADATA_BASE_URL}/{token_id}.json"
         async with aiohttp.ClientSession() as session:
@@ -161,8 +210,10 @@ async def fetch_nft_metadata(token_id: str) -> Optional[Dict]:
                         {'trait_type': 'Staking Multiplier', 'value': '10'}
                     ])
                 }
-                metadata_cache[token_id] = (metadata, time.time() + 24 * 3600)  # Cache for 24 hours
-                logger.info(f"Fetched metadata for token {token_id}: {json.dumps(metadata, indent=2)}")
+                metadata_cache[token_id] = (metadata, time.time() + 24 * 3600)
+                if len(metadata_cache) > 1000:
+                    metadata_cache.popitem(last=False)
+                logger.info(f"Fetched metadata for token {token_id}")
                 return metadata
     except Exception as e:
         logger.error(f"Failed to fetch metadata for token {token_id}: {e}")
@@ -176,15 +227,20 @@ async def fetch_nft_metadata(token_id: str) -> Optional[Dict]:
             ]
         }
         metadata_cache[token_id] = (metadata, time.time() + 24 * 3600)
+        if len(metadata_cache) > 1000:
+            metadata_cache.popitem(last=False)
         return metadata
 
 async def download_media(url: str) -> Optional[io.BytesIO]:
-    """Download media to memory, handling direct URLs."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=5) as response:
                 if response.status != 200:
                     logger.error(f"Media download failed, status {response.status}: {url}")
+                    return None
+                content_length = response.content_length
+                if content_length and content_length > 50 * 1024 * 1024:
+                    logger.error(f"Media file too large: {content_length} bytes")
                     return None
                 data = io.BytesIO(await response.read())
                 data.name = 'nft.mp4' if url.endswith('.mp4') else 'nft.jpg'
@@ -192,29 +248,10 @@ async def download_media(url: str) -> Optional[io.BytesIO]:
                 return data
     except Exception as e:
         logger.error(f"Failed to download media from {url}: {e}")
-    return None
+        return None
 
 def shorten_address(address: str) -> str:
     return f"{address[:6]}...{address[-4:]}" if address and Web3.is_address(address) else ''
-
-def load_posted_transactions() -> Set[str]:
-    try:
-        with file_lock:
-            if not os.path.exists('posted_transactions.txt'):
-                return set()
-            with open('posted_transactions.txt', 'r') as f:
-                return set(line.strip() for line in f if line.strip())
-    except Exception as e:
-        logger.warning(f"Could not load posted_transactions.txt: {e}")
-        return set()
-
-def log_posted_transaction(transaction_hash: str) -> None:
-    try:
-        with file_lock:
-            with open('posted_transactions.txt', 'a') as f:
-                f.write(f"{transaction_hash}\n")
-    except Exception as e:
-        logger.error(f"Failed to write to posted_transactions.txt: {e}")
 
 def get_pets_price() -> float:
     try:
@@ -233,8 +270,23 @@ def get_pets_price() -> float:
         logger.info(f"$PETS price from GeckoTerminal: ${price:.10f}")
         return price
     except Exception as e:
-        logger.error(f"GeckoTerminal $PETS price fetch failed: {e}")
-        return 0.00003886
+        logger.warning(f"GeckoTerminal $PETS price fetch failed: {e}")
+        try:
+            headers = {'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY}
+            response = requests.get(
+                "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest",
+                params={'symbol': 'PETS', 'convert': 'USD'},
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            price = data['data']['PETS'][0]['quote']['USD']['price']
+            logger.info(f"$PETS price from CoinMarketCap: ${price:.10f}")
+            return price
+        except Exception as e:
+            logger.error(f"CoinMarketCap $PETS price fetch failed: {e}")
+            return 0.00003886
 
 def get_bnb_price() -> float:
     try:
@@ -257,46 +309,38 @@ def get_bnb_price() -> float:
         return 600.0
 
 async def fetch_nft_transactions() -> tuple[List[Dict], List[Dict]]:
-    """Fetch BEP-721 token transfer events using BscScan API with HTTP requests."""
     try:
-        url = "https://api.bscscan.com/api"
-        params = {
-            'module': 'account',
-            'action': 'tokentx',
-            'contractaddress': NFT_CONTRACT_ADDRESS,
-            'page': 1,
-            'offset': 10,  # Limit to 10 recent transfers
-            'sort': 'desc',
-            'apikey': BSCSCAN_API_KEY
-        }
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        transfers = response.json().get('result', [])
-        logger.info(f"Fetched {len(transfers)} transfer events for contract {NFT_CONTRACT_ADDRESS}")
+        global last_block_number
+        if last_block_number is None:
+            last_block_number = w3.eth.block_number
+            logger.info(f"Initialized last_block_number to {last_block_number}")
+
+        contract = w3.eth.contract(address=Web3.to_checksum_address(NFT_CONTRACT_ADDRESS), abi=NFT_ABI)
+        transfer_event = contract.events.Transfer
+        filter_params = construct_event_filter_params(
+            transfer_event._get_event_abi(),
+            w3.codec,
+            fromBlock=max(last_block_number - 100, 0),
+            toBlock='latest'
+        )
 
         sales = []
         listings = []
-        for transfer in transfers:
-            tx_hash = transfer['hash']
-            token_id = transfer['tokenID']
-            from_address = transfer['from']
-            to_address = transfer['to']
-            block_number = int(transfer['blockNumber'])
-            timestamp = int(transfer['timeStamp'])
-            date = datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        events = w3.eth.get_logs(filter_params)
+        for event in events:
+            event_data = get_event_data(w3.codec, transfer_event._get_event_abi(), event)
+            tx_hash = event['transactionHash'].hex()
+            if tx_hash in posted_transactions:
+                continue
 
-            # Fetch transaction details to check for payment (indicating a sale)
-            tx_details_url = "https://api.bscscan.com/api"
-            tx_params = {
-                'module': 'proxy',
-                'action': 'eth_getTransactionByHash',
-                'txhash': tx_hash,
-                'apikey': BSCSCAN_API_KEY
-            }
-            tx_response = requests.get(tx_details_url, params=tx_params, timeout=10)
-            tx_response.raise_for_status()
-            tx_data = tx_response.json().get('result', {})
-            value_wei = int(tx_data.get('value', '0x0'), 16)
+            token_id = str(event_data['args']['tokenId'])
+            from_address = event_data['args']['from']
+            to_address = event_data['args']['to']
+            block_number = event['blockNumber']
+            timestamp = w3.eth.get_block(block_number)['timestamp']
+            
+            tx = w3.eth.get_transaction(tx_hash)
+            value_wei = tx.get('value', 0)
             bnb_value = value_wei / 1e18 if value_wei > 0 else 0
 
             if bnb_value > 0:
@@ -318,6 +362,11 @@ async def fetch_nft_transactions() -> tuple[List[Dict], List[Dict]]:
                     'block_number': block_number
                 })
 
+        if events:
+            last_block_number = max(event['blockNumber'] for event in events)
+            logger.info(f"Updated last_block_number to {last_block_number}")
+
+        logger.info(f"Fetched {len(sales)} sales and {len(listings)} listings")
         return sales, listings
     except Exception as e:
         logger.error(f"Failed to fetch NFT transactions: {e}")
@@ -325,7 +374,18 @@ async def fetch_nft_transactions() -> tuple[List[Dict], List[Dict]]:
         return [], []
 
 async def send_nft_media(context: ContextTypes.DEFAULT_TYPE, chat_id: str, metadata: Dict, caption: str, max_retries: int = 3, delay: int = 1) -> bool:
-    """Send NFT video or image to Telegram."""
+    if not chat_id:
+        logger.error("Invalid chat_id provided")
+        return False
+
+    try:
+        await context.bot.get_chat(chat_id)
+    except Exception as e:
+        logger.error(f"Cannot access chat {chat_id}: {e}")
+        if ADMIN_USER_ID:
+            await context.bot.send_message(ADMIN_USER_ID, f"⚠️ Cannot send to chat {chat_id}: {str(e)}", parse_mode='MarkdownV2')
+        return False
+
     for i in range(max_retries):
         try:
             logger.info(f"Attempt {i+1}/{max_retries} to send media to chat {chat_id}")
@@ -334,6 +394,14 @@ async def send_nft_media(context: ContextTypes.DEFAULT_TYPE, chat_id: str, metad
             if not media_data:
                 logger.error(f"Failed to download media: {media_url}")
                 return await send_gif_with_retry(context, chat_id, FALLBACK_GIF, caption)
+
+            media_data.seek(0, io.SEEK_END)
+            file_size = media_data.tell()
+            media_data.seek(0)
+            if file_size > 50 * 1024 * 1024:
+                logger.error(f"Media file too large: {file_size} bytes")
+                return await send_gif_with_retry(context, chat_id, FALLBACK_GIF, caption)
+
             logger.info(f"Sending media message with caption length: {len(caption)}")
             if media_url.endswith('.mp4'):
                 await context.bot.send_video(chat_id=chat_id, video=InputFile(media_data), caption=caption, parse_mode='MarkdownV2')
@@ -344,6 +412,8 @@ async def send_nft_media(context: ContextTypes.DEFAULT_TYPE, chat_id: str, metad
         except Exception as e:
             logger.error(f"Failed to send media (attempt {i+1}/{max_retries}): {e}")
             if i == max_retries - 1:
+                if ADMIN_USER_ID:
+                    await context.bot.send_message(ADMIN_USER_ID, f"⚠️ Failed to send media to {chat_id}: {str(e)}", parse_mode='MarkdownV2')
                 return await send_gif_with_retry(context, chat_id, FALLBACK_GIF, caption)
             await asyncio.sleep(delay)
     return False
@@ -394,7 +464,7 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
                 f"🌸 *3D NFT New Era Sold!* 🌸\n\n"
                 f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n\n"
                 f"{emojis}\n\n"
-                f"🔥 **Sold For:** {int(bnb_value * 1e18 / 1e18):,.4f} BNB \\(\\${escape_markdown(f'{usd_value:.2f}')}\\)\n\n"
+                f"🔥 **Sold For:** {bnb_value:,.4f} BNB \\(\\${escape_markdown(f'{usd_value:.2f}')}\\)\n\n"
                 f"🦑 Buyer: {escape_markdown(shorten_address(wallet_address))}\n"
                 f"[🔍 View on BscScan]({tx_url})\n\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
@@ -413,7 +483,7 @@ async def process_transaction(context: ContextTypes.DEFAULT_TYPE, transaction: D
             message = (
                 f"🔥 *New 3D NFT New Era Listing* 🔥\n\n"
                 f"**NFT:** {nft_name} \\(Rarity: {rarity}, Multiplier: {multiplier}\\)\n\n"
-                f"**Listed for:** {int(bnb_value * 1e18 / 1e18):,.4f} BNB \\(\\${escape_markdown(f'{usd_value:.2f}')}\\)\n\n"
+                f"**Listed for:** {bnb_value:,.4f} BNB \\(\\${escape_markdown(f'{usd_value:.2f}')}\\)\n\n"
                 f"Listed by: {escape_markdown(shorten_address(wallet_address))}\n\n"
                 f"Join our Alpha Group for 60s early alerts\\! 👀\n\n\n"
                 f"📦 [Marketplace]({MARKETPLACE_LINK}) \\| 📈 [Chart]({CHART_LINK}) \\| 🛍 [Merch]({MERCH_LINK}) \\| 💰 [Buy \\$PETS]({BUY_PETS_LINK})"
@@ -454,8 +524,6 @@ async def monitor_transactions(context: ContextTypes.DEFAULT_TYPE) -> None:
             for listing in listings:
                 if listing['tx_hash'] not in posted_transactions:
                     await process_transaction(context, listing, is_sale=False, token_id=listing['token_id'])
-            if sales or listings:
-                last_block_number = max(max((s['block_number'] for s in sales), default=0), max((l['block_number'] for l in listings), default=0))
             await asyncio.sleep(POLLING_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Monitoring task cancelled")
@@ -468,6 +536,20 @@ async def monitor_transactions(context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.sleep(POLLING_INTERVAL)
     logger.info("Monitoring task stopped")
     monitoring_task = None
+
+async def error_monitor(context: ContextTypes.DEFAULT_TYPE):
+    while True:
+        if recent_errors and ADMIN_USER_ID:
+            error_summary = "\n".join([f"{e['time']}: {e['error']}" for e in recent_errors[-3:]])
+            try:
+                await context.bot.send_message(
+                    ADMIN_USER_ID,
+                    f"⚠️ Recent Errors:\n```\n{error_summary}\n```",
+                    parse_mode='MarkdownV2'
+                )
+            except Exception as e:
+                logger.error(f"Failed to send error notification: {e}")
+        await asyncio.sleep(3600)
 
 def is_admin(update: Update) -> bool:
     return str(update.effective_user.id) == ADMIN_USER_ID
@@ -521,7 +603,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         bnb_price = get_bnb_price()
         latest_sale = max(latest_transactions['Sale'].items(), key=lambda x: x[1]['timestamp'], default=(None, {}))
         latest_listing = max(latest_transactions['Listing'].items(), key=lambda x: x[1]['timestamp'], default=(None, {}))
-        token_id = latest_sale[1].get('token_id') or '130'  # Use token ID 130 for valid video
+        token_id = latest_sale[1].get('token_id') or '130'
         metadata = await fetch_nft_metadata(token_id)
         sale_details = (
             f"**Latest Sale:**\n\n"
@@ -608,19 +690,18 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         pets_price = get_pets_price()
         bnb_price = get_bnb_price()
-        bnb_value_sale = 0.05  # Sample sale value in BNB
-        bnb_value_listing = 0.0  # Sample listing with no BNB value
+        bnb_value_sale = 0.05
+        bnb_value_listing = 0.0
         usd_value_sale = bnb_value_sale * bnb_price
         usd_value_listing = random.uniform(1, 10) * pets_price
         wallet_address_sale = f"0x{'{:040x}'.format(random.randint(0, 2**160))}"
         wallet_address_listing = f"0x{'{:040x}'.format(random.randint(0, 2**160))}"
-        token_id = '130'  # Use token ID 130 for valid video
+        token_id = '130'
         metadata = await fetch_nft_metadata(token_id)
         nft_name = escape_markdown(metadata.get('name', 'MicroPets NFT'))
         rarity = escape_markdown(next((attr['value'] for attr in metadata.get('attributes', []) if attr['trait_type'] == 'Rarity Ranking'), 'Common'))
         multiplier = escape_markdown(next((attr['value'] for attr in metadata.get('attributes', []) if attr['trait_type'] == 'Staking Multiplier'), '10'))
 
-        # Test Sale
         test_tx_hash_sale = f"0xTestSale{uuid.uuid4().hex[:16]}"
         emoji_count_sale = min(int(usd_value_sale // 100), 100)
         emojis_sale = '💰' * emoji_count_sale
@@ -635,7 +716,6 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         success_sale = await send_nft_media(context, chat_id, metadata or {}, sale_message)
 
-        # Test Listing
         test_tx_hash_listing = f"0xTestListing{uuid.uuid4().hex[:16]}"
         listing_message = (
             f"🔥 *New 3D NFT New Era Listing* Test 🔥\n\n"
@@ -703,12 +783,12 @@ async def health_check():
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
 
-# Lifespan handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bot_app
+    global bot_app, posted_transactions
     logger.info("Starting bot application")
     try:
+        init_db()
         await initialize_last_block_number()
         posted_transactions.update(load_posted_transactions())
         bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -738,6 +818,7 @@ async def lifespan(app: FastAPI):
         ]
         await bot_app.initialize()
         await bot_app.start()
+        asyncio.create_task(error_monitor(bot_app))
         await bot_app.updater.start_polling(
             poll_interval=3,
             timeout=10,
