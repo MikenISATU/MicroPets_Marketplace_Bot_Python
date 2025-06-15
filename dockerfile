@@ -16,24 +16,22 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python -m venv --copies $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Upgrade pip and install dependencies
+# Copy and install dependencies
 COPY requirements.txt .
+RUN if [ ! -f requirements.txt ]; then echo "requirements.txt not found" && exit 1; fi
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Final stage
 FROM python:3.10-slim
 
-# Install runtime dependencies (minimal)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Set working directory
+WORKDIR /app
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
 
 # Copy application code
-WORKDIR /app
 COPY . .
 
 # Set environment variables
@@ -44,4 +42,4 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8080
 
 # Run the application
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
