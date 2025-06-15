@@ -24,6 +24,8 @@ from collections import OrderedDict, defaultdict
 from dotenv import load_dotenv
 from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential
+import sys
+import importlib.util
 
 # Logging setup
 logging.basicConfig(
@@ -35,6 +37,29 @@ httpx_logger = logging.getLogger("httpx")
 httpx_logger.setLevel(logging.WARNING)
 telegram_logger = logging.getLogger("telegram")
 telegram_logger.setLevel(logging.WARNING)
+
+# Check and install dependencies (optional, for manual setup)
+def setup_dependencies():
+    required_packages = {
+        'fastapi': 'fastapi',
+        'uvicorn': 'uvicorn',
+        'web3': 'web3.py',
+        'aiohttp': 'aiohttp',
+        'python-dotenv': 'python-dotenv',
+        'tenacity': 'tenacity',
+        'python-telegram-bot': 'python-telegram-bot'
+    }
+    missing = []
+    for pkg_name, import_name in required_packages.items():
+        if importlib.util.find_spec(import_name) is None:
+            missing.append(pkg_name)
+    if missing:
+        logger.warning(f"Missing dependencies: {missing}. Please install them with: pip install {' '.join(missing)}")
+        # Uncomment the following lines to auto-install (requires pip access)
+        # import subprocess
+        # subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+    else:
+        logger.info("All dependencies are present.")
 
 # Load environment variables
 load_dotenv()
@@ -55,7 +80,7 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 ALPHA_CHAT_ID = os.getenv('ALPHA_CHAT_ID')
 MARKET_CHAT_ID = os.getenv('MARKET_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
-POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 10))  # Reduced for Web3
+POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 10))
 
 # Log environment variables (mask sensitive)
 env_vars = {
@@ -175,7 +200,7 @@ def log_posted_transaction(transaction_hash: str) -> None:
     except Exception as e:
         logger.error(f"Failed to log transaction {transaction_hash}: {e}")
 
-# Helper functions
+# Helper functions (unchanged from original)
 async def initialize_last_block_number():
     global last_block_number
     try:
@@ -554,7 +579,7 @@ async def error_monitor(context: ContextTypes.DEFAULT_TYPE):
 def is_admin(update: Update) -> bool:
     return str(update.effective_user.id) == ADMIN_USER_ID
 
-# Command handlers
+# Command handlers (unchanged from original)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     logger.info(f"Received /start command from user {update.effective_user.id} in chat {chat_id}")
@@ -788,6 +813,7 @@ async def lifespan(app: FastAPI):
     global bot_app, posted_transactions
     logger.info("Starting bot application")
     try:
+        setup_dependencies()  # Check and notify about missing dependencies
         init_db()
         await initialize_last_block_number()
         posted_transactions.update(load_posted_transactions())
@@ -858,6 +884,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 if __name__ == "__main__":
+    # Run the FastAPI app directly with uvicorn
     import uvicorn
     logger.info(f"Starting Uvicorn server on port {PORT}")
     try:
