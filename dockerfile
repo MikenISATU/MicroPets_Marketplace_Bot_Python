@@ -1,38 +1,15 @@
-# Build stage
-FROM python:3.10-slim AS builder
-
-# Set working directory
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    python3-dev \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create and activate virtual environment
-ENV VIRTUAL_ENV=/opt/venv
-RUN python -m venv --copies $VIRTUAL_ENV
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-
-# Copy and install dependencies
-COPY requirements.txt .
-RUN if [ ! -f requirements.txt ]; then echo "requirements.txt not found" && exit 1; fi
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Final stage
 FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app
 
-# Copy virtual environment from builder
-COPY --from=builder /opt/venv /opt/venv
-
 # Copy application code
-COPY . .
+COPY . /app/.
+
+# Create and use virtual environment
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Set environment variables
 ENV PATH="/opt/venv/bin:$PATH"
